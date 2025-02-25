@@ -4,11 +4,36 @@ import asyncio
 import yaml
 import random
 import datetime
+import os
 
 from jfapi import JFAPI
 
-with open('config.yml', 'r', encoding='utf8') as conffile:
-    config = yaml.load(conffile, yaml.loader.Loader)
+config = {}
+
+'''
+Load Settings
+'''
+if not os.getenv('JELLYCHORD_USE_CONF_FILE') == '0':
+    with open('config.yml', 'r', encoding='utf8') as conffile:
+        config = yaml.load(conffile, yaml.loader.Loader)
+
+else:
+    config = {
+        'discord-token': os.getenv('JELLYCHORD_DC_TOKEN'),
+        'jf-server': os.getenv('JELLYCHORD_JF_SERVER'),
+        'jf-apikey': os.getenv('JELLYCHORD_JF_APIKEY'),
+        'command-group': os.getenv('JELLYCHORD_COMMAND_GROUP'),
+        'search-limit': os.getenv('JELLYCHORD_SEARCH_LIMIT'),
+        'enable-debug': os.getenv('JELLYCHORD_ENABLE_DEBUG') == '1',
+    }
+
+    if not config['search-limit']:
+        config['search-limit'] = 25
+    else:
+        config['search-limit'] = int(config['search-limit'])
+
+    if config['enable-debug']:
+        config['debug-server'] = int(os.getenv('JELLYCHORD_DEBUG_SERVER'))
 
 JF_APICLIENT = JFAPI(config['jf-server'],config['jf-apikey'])
 LIMIT = max(1, min(config['search-limit'], 25))
