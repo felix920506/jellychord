@@ -1,0 +1,10 @@
+services:
+  jellychord:
+    build:
+      context: .
+    environment:
+      JELLYCHORD_DC_TOKEN: discord_token_here
+      JELLYCHORD_JF_SERVER: https://media.example.com/jellyfin
+      JELLYCHORD_JF_APIKEY: your_jellyfin_apikey
+      JELLYCHORD_COMMAND_GROUP: jellychord
+      JELLYCHORD_SEARCH_LIMIT: 25

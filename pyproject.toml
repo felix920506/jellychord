@@ -10,6 +10,8 @@ python = "^3.12"
 py-cord = {extras = ["voice"], version = "^2.6.1"}
 pyyaml = "^6.0.2"
 
+[tool.poetry.requires-plugins]
+poetry-plugin-export = ">=1.8"
 
 [build-system]
 requires = ["poetry-core"]
