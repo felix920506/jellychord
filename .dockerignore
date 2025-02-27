@@ -41,3 +41,4 @@ poetry.lock
 README.Docker.md
 pyproject.toml
 renovate.json
+**/.github
