@@ -8,7 +8,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: export requirements with poetry
-        uses: divideprojects/poetry-export-requirements-action
+        uses: divideprojects/poetry-export-requirements-action@v1.4.0
         with:
           without-hashes: true
           outfile-name: requirements.txt
