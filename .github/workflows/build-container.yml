@@ -27,6 +27,9 @@ jobs:
       #     without-hashes: true
       #     outfile-name: requirements.txt
 
+      - name: debug
+        run: ls
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
