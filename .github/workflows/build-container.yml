@@ -7,11 +7,25 @@ jobs:
       - name: checkout repo
         uses: actions/checkout@v4
 
-      - name: export requirements with poetry
-        uses: divideprojects/poetry-export-requirements-action@v1.4.0
+      - name: setup Python
+        uses: actions/setup-python@v5
         with:
-          without-hashes: true
-          outfile-name: requirements.txt
+          python-version: 3.12
+      
+      - name: Install poetry
+        run: python3 -m pip install poetry
+      
+      - name: Install poetry dependencies
+        run: poetry install
+
+      - name: export requirements.txt
+        run: poetry export -f requirements.txt --output requirements.txt
+
+      # - name: export requirements with poetry
+      #   uses: divideprojects/poetry-export-requirements-action@v1.4.0
+      #   with:
+      #     without-hashes: true
+      #     outfile-name: requirements.txt
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
