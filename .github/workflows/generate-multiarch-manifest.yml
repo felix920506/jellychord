@@ -15,16 +15,8 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # - uses: int128/docker-manifest-create-action@v2
-      #   with:
-      #     latests: |
-      #       ghcr.io/felix920506/jellychord:latest
-      #     sources: |
-      #       ghcr.io/felix920506/jellychord:latest-amd64
-      #       ghcr.io/felix920506/jellychord:latest-arm64
-
       - name: Create and push manifest images
-        uses: Noelware/docker-manifest-action@master # or use a pinned version in the Releases tab
+        uses: Noelware/docker-manifest-action@master
         with:
             inputs: ghcr.io/felix920506/jellychord:latest
             images: ghcr.io/felix920506/jellychord:latest-amd64,ghcr.io/felix920506/jellychord:latest-arm64
