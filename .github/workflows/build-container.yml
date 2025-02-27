@@ -1,7 +1,7 @@
 name: Build Docker Container
 on: [workflow_dispatch]
 jobs:
-  build-and-publish:
+  build-and-publish-amd64:
     runs-on: ubuntu-latest
     steps:
       - name: checkout repo
@@ -21,12 +21,6 @@ jobs:
       - name: export requirements.txt
         run: poetry export -f requirements.txt --output requirements.txt
 
-      # - name: export requirements with poetry
-      #   uses: divideprojects/poetry-export-requirements-action@v1.4.0
-      #   with:
-      #     without-hashes: true
-      #     outfile-name: requirements.txt
-
       - name: debug
         run: ls
 
@@ -45,10 +39,42 @@ jobs:
 
       - name: push amd64 image
         run: docker push ghcr.io/felix920506/jellychord:latest-amd64
+  
+  build-and-publish-arm64:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: checkout repo
+        uses: actions/checkout@v4
 
-      # - name: Build and push
-      #   uses: docker/build-push-action@v6
-      #   with:
-      #     push: true
-      #     tags: ghcr.io/felix920506/jellychord:latest
-      #     platforms: linux/amd64,linux/arm64,linux/arm/v7
+      - name: setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: 3.12
+      
+      - name: Install poetry
+        run: python3 -m pip install poetry
+      
+      - name: Install poetry dependencies
+        run: poetry install
+
+      - name: export requirements.txt
+        run: poetry export -f requirements.txt --output requirements.txt
+
+      - name: debug
+        run: ls
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ghcr
+        uses: docker/login-action@v2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: build amd64 image
+        run: docker build -t ghcr.io/felix920506/jellychord:latest-arm64 --platform linux/arm64 .
+
+      - name: push amd64 image
+        run: docker push ghcr.io/felix920506/jellychord:latest-arm64
