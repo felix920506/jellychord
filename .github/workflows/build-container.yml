@@ -1,7 +1,7 @@
 name: Build Docker Container
 on: [workflow_dispatch]
 jobs:
-  generate-requirements.txt:
+  generate-requirements-txt:
     runs-on: ubuntu-latest
     steps:
       - name: checkout repo
