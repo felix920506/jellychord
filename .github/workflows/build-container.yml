@@ -36,6 +36,9 @@ jobs:
       - name: build amd64 image
         run: docker build -t ghcr.io/felix920506/jellychord:latest-amd64 --platform linux/amd64 .
 
+      - name: login to ghcr
+        run: echo ${{ secrets.GITHUB_TOKEN }} | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
       - name: push amd64 image
         run: docker push ghcr.io/felix920506/jellychord:latest-amd64
 
