@@ -32,6 +32,26 @@ You will need to show file extensions if you are on Windows.
 
 ## How to run
 
+### Using docker compose
+
+Sample docker compose config:
+
+```yml
+services:
+  jellychord:
+    image: ghcr.io/felix920506/jellychord:latest
+    environment:
+      JELLYCHORD_DC_TOKEN: discord_token_here
+      JELLYCHORD_JF_SERVER: https://media.example.com/jellyfin
+      JELLYCHORD_JF_APIKEY: your_jellyfin_apikey
+      JELLYCHORD_COMMAND_GROUP: jellychord
+      JELLYCHORD_SEARCH_LIMIT: 25
+```
+
+This can also be found in the repository as `compose.yaml`
+
+### Directly from source
+
 1. Open a terminal in the bot folder
 2. run `poetry run python3 main.py` to start the bot. You may need to run `poetry run python main.py` if you are on Windows.
 3. press `Ctrl+C` in the terminal window to exit the bot. MacOS uses the same key bind.

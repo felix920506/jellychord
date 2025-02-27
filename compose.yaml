@@ -1,7 +1,6 @@
 services:
   jellychord:
-    build:
-      context: .
+    image: ghcr.io/felix920506/jellychord:latest
     environment:
       JELLYCHORD_DC_TOKEN: discord_token_here
       JELLYCHORD_JF_SERVER: https://media.example.com/jellyfin
