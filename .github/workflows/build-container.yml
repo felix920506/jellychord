@@ -73,8 +73,8 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: build amd64 image
+      - name: build arm64 image
         run: docker build -t ghcr.io/felix920506/jellychord:latest-arm64 --platform linux/arm64 .
 
-      - name: push amd64 image
+      - name: push arm64 image
         run: docker push ghcr.io/felix920506/jellychord:latest-arm64

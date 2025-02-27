@@ -32,6 +32,9 @@ else:
     else:
         config['search-limit'] = int(config['search-limit'])
 
+    if not config['command-group']: 
+        config['command-group'] = 'jellychord'
+
     if config['enable-debug']:
         config['debug-server'] = int(os.getenv('JELLYCHORD_DEBUG_SERVER'))
 
