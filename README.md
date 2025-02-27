@@ -12,8 +12,6 @@ Requirements related to the Jellyfin server:
 
 Requirements related to the bot server:
 
-- A valid install of `ffmpeg` added to PATH
-- Python and Poetry
 - An internet connection that does not block access to Discord Voice
 
 > [!IMPORTANT]
@@ -42,6 +40,13 @@ This can also be found in the repository as `compose.yaml`
 You will need to create a Discord bot account to run this application.
 
 ### Directly from source
+
+You will need the following setup before running the bot:
+
+- A valid install of `ffmpeg` added to PATH
+- Python and Poetry
+
+Steps:
 
 1. Clone the repo
 2. Create a copy of `config.yml.example` and name it `config.yml`, confirm rename the extension if asked.
