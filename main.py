@@ -277,6 +277,7 @@ class listView(discord.ui.View):
         self.prevButton = listPrevButton()
         self.nextButton = listNextButton()
         self.prevButton.disabled = True
+        self.nextButton.disabled = self.page == pages - 1
         self.add_item(self.prevButton)
         self.add_item(listRefreshButton())
         self.add_item(self.nextButton)
