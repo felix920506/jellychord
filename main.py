@@ -53,15 +53,15 @@ bot = discord.Bot()
 '''
 Helper Functions
 '''
-async def searchHelper(term: str, limit: int = LIMIT, type:str = None):
-    if type == 'Soundtrack':
-        type = ['Audio']
-    elif type == 'Album':
-        type = ['MusicAlbum']
+async def searchHelper(term: str, limit: int = LIMIT, searchType:str = None):
+    if searchType == 'Soundtrack':
+        searchType = ['Audio']
+    elif searchType == 'Album':
+        searchType = ['MusicAlbum']
     else:
-        type = ['Audio', 'MusicAlbum']
+        searchType = ['Audio', 'MusicAlbum']
     
-    res = await JF_APICLIENT.search(term, limit, type)
+    res = await JF_APICLIENT.search(term, limit, searchType)
     return res
 
 async def playHelperTrack(item: dict, ctx: discord.ApplicationContext, position: str):
@@ -149,9 +149,9 @@ def playNextTrack(guild, error=None):
         playing.pop(guild.id)
         asyncio.run_coroutine_threadsafe(vc.disconnect(), vc.loop)
 
-def getTrackString(item: dict, artistLimit: int = 1, type: bool = False):
+def getTrackString(item: dict, artistLimit: int = 1, showType: bool = False, showSize: bool = False):
 
-    if not type:
+    if not showType:
         res = ''
     elif item["Type"] == "MusicAlbum":
         res = 'Album: '
@@ -167,6 +167,10 @@ def getTrackString(item: dict, artistLimit: int = 1, type: bool = False):
         res += ' - '
     
     res += item["Name"]
+
+    if showSize and item["Type"] == "Audio":
+        secs = item['RunTimeTicks'] // 10000000
+        res += f' {formatTimeSecs(secs, secs >= 3600)}'
     return res
 
 def formatTimeSecs(secs: int, force_hrs: bool = False) -> str:
@@ -183,7 +187,7 @@ def formatTimeSecs(secs: int, force_hrs: bool = False) -> str:
 Discord View Related
 '''
 class searchDropdown(discord.ui.Select):
-    def __init__(self, items: list[dict], ctx: discord.ApplicationContext, when: str):
+    def __init__(self, items: list[dict], ctx: discord.ApplicationContext, when: str, showType: bool = True):
         super(searchDropdown, self).__init__()
         self.ctx = ctx
         self.when = when
@@ -191,12 +195,12 @@ class searchDropdown(discord.ui.Select):
         self.max_values = 1
         self.min_values = 1
         for i in range(min(len(items), 25)):
-            label = getTrackString(items[i], type=not bool(type))
+            label = getTrackString(items[i], showType=showType, showSize=True)
             label = label[:97]+'...' if len(label) > 100 else label
             self.add_option(label = label, value = str(i))
     
     async def callback(self, interaction: discord.Interaction):
-        await interaction.response.edit_message(content=f'Playing {getTrackString(self.items[int(self._selected_values[0])], type=True)}',view=None)
+        await interaction.response.edit_message(content=f'Playing {getTrackString(self.items[int(self._selected_values[0])], showType=True)}',view=None)
         await playHelperGeneric(self.items[int(self._selected_values[0])], self.ctx, self.when)
 
 async def onSearchViewTimeout(self: discord.ui.View):
@@ -297,11 +301,11 @@ else:
 @cmdgrp.command()
 async def search(ctx: discord.ApplicationContext, 
                  term: discord.Option(str),
-                 type: discord.Option(str, choices=['Soundtrack', 'Album'], required=False),
+                 searchtype: discord.Option(str, name="type", choices=['Soundtrack', 'Album'], required=False),
                  when: discord.Option(str, choices=['now', 'next', 'last'], required=False) = 'last'):
     
     await ctx.defer(invisible=True)
-    res = await searchHelper(term, type=type)
+    res = await searchHelper(term, searchType=searchtype)
     if not res:
         await ctx.respond("No items match your query.")
     elif not ctx.author.voice and not ctx.voice_client:
@@ -309,7 +313,7 @@ async def search(ctx: discord.ApplicationContext,
     else:
         view = discord.ui.View()
         view.on_timeout = onSearchViewTimeout
-        view.add_item(searchDropdown(res, ctx, when))
+        view.add_item(searchDropdown(res, ctx, when, not searchtype))
 
         await ctx.respond('Select an item to play:', view=view)
 
@@ -327,7 +331,7 @@ async def play(ctx: discord.ApplicationContext,
     elif not ctx.author.voice and not ctx.voice_client:
         await ctx.respond('You are not in any voice channel')
     else:
-        await ctx.respond(f'Playing {getTrackString(res[0], type=True)}')
+        await ctx.respond(f'Playing {getTrackString(res[0], showType=True)}')
         await playHelperGeneric(res[0], ctx, when)
 
 @cmdgrp.command()
@@ -502,7 +506,7 @@ if DEBUG:
         elif not ctx.author.voice:
             await ctx.respond('You are not in any voice channel')
         else:
-            await ctx.respond(f'Playing {getTrackString(res[0], type=True)}')
+            await ctx.respond(f'Playing {getTrackString(res[0], showType=True)}')
             await playHelperGeneric(res[0], ctx, when)
 
 
