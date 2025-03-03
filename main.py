@@ -170,7 +170,7 @@ def getTrackString(item: dict, artistLimit: int = 1, showType: bool = False, sho
 
     if showSize and item["Type"] == "Audio":
         secs = item['RunTimeTicks'] // 10000000
-        res += f' {formatTimeSecs(secs, secs >= 3600)}'
+        res += f' ({formatTimeSecs(secs, secs >= 3600)})'
     return res
 
 def formatTimeSecs(secs: int, force_hrs: bool = False) -> str:
@@ -320,11 +320,11 @@ async def search(ctx: discord.ApplicationContext,
 @cmdgrp.command()
 async def play(ctx: discord.ApplicationContext,
                term: discord.Option(str),
-               type: discord.Option(str, choices=['Soundtrack', 'Album'], required=False),
+               searchtype: discord.Option(str, name='type', choices=['Soundtrack', 'Album'], required=False),
                when: discord.Option(str, choices=['now', 'next', 'last'], required=False) = 'last'):
     
     await ctx.defer(invisible=True)
-    res = await searchHelper(term, limit=1, type=type)
+    res = await searchHelper(term, limit=1, searchType=searchtype)
 
     if not res:
         await ctx.respond('No items match your query')
