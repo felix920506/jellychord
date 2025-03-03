@@ -21,6 +21,7 @@ Requirements related to the bot server:
 
 ### Using docker compose
 
+x64 and arm64 images are provided.
 Sample docker compose config:
 
 ```yml
