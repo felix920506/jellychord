@@ -33,10 +33,10 @@ jobs:
           path: requirements.txt
 
   build-and-publish-amd64:
-    outputs:
-      amd64_digest: ${{ steps.build_amd64.outputs.digest }}
     runs-on: ubuntu-latest
     needs: generate-requirements-txt
+    outputs:
+      amd64_digest: ${{ steps.build_amd64.outputs.digest }}
     steps:
       - name: Checkout repo
         uses: actions/checkout@v5
@@ -55,7 +55,7 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-  
+
       - name: Build & push amd64 image
         id: build_amd64
         run: |
@@ -64,13 +64,13 @@ jobs:
             --tag ghcr.io/${{ github.repository }}:latest-amd64 \
             --push .
           DIGEST=$(docker buildx imagetools inspect --json ghcr.io/${{ github.repository }}:latest-amd64 | jq -r '.digest')
-          echo "amd64_digest=$DIGEST" >> $GITHUB_OUTPUT
+          echo "digest=$DIGEST" >> $GITHUB_OUTPUT
 
   build-and-publish-arm64:
-    outputs:
-      arm64_digest: ${{ steps.build_arm64.outputs.digest }}
     runs-on: ubuntu-24.04-arm
     needs: generate-requirements-txt
+    outputs:
+      arm64_digest: ${{ steps.build_arm64.outputs.digest }}
     steps:
       - name: Checkout repo
         uses: actions/checkout@v5
@@ -98,7 +98,7 @@ jobs:
             --tag ghcr.io/${{ github.repository }}:latest-arm64 \
             --push .
           DIGEST=$(docker buildx imagetools inspect --json ghcr.io/${{ github.repository }}:latest-arm64 | jq -r '.digest')
-          echo "arm64_digest=$DIGEST" >> $GITHUB_OUTPUT
+          echo "digest=$DIGEST" >> $GITHUB_OUTPUT
 
   manifest:
     runs-on: ubuntu-latest
