@@ -113,8 +113,8 @@ jobs:
 
       - name: Create multi-arch manifest
         run: |
-          AMD64_DIGEST=${{ needs.build-amd64.outputs.amd64_digest }}
-          ARM64_DIGEST=${{ needs.build-arm64.outputs.arm64_digest }}
+          AMD64_DIGEST=${{ needs.build-and-publish-amd64.outputs.amd64_digest }}
+          ARM64_DIGEST=${{ needs.build-and-publish-arm64.outputs.arm64_digest }}
           echo "amd64 digest = $AMD64_DIGEST"
           echo "arm64 digest = $ARM64_DIGEST"
 
