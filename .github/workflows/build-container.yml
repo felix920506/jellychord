@@ -54,15 +54,14 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
   
-      - name: Build and push amd64 image
+      - name: Build & push amd64 image
         id: build_amd64
         run: |
           docker buildx build \
             --platform linux/amd64 \
             --tag ghcr.io/${{ github.repository }}:latest-amd64 \
             --push .
-          # extract digest
-          DIGEST=$(docker buildx imagetools inspect ghcr.io/${{ github.repository }}:latest-amd64 --format '{{.Digest}}')
+          DIGEST=$(docker buildx imagetools inspect --json ghcr.io/${{ github.repository }}:latest-amd64 | jq -r '.digest')
           echo "amd64_digest=$DIGEST" >> $GITHUB_OUTPUT
 
   build-and-publish-arm64:
@@ -94,7 +93,7 @@ jobs:
             --platform linux/arm64 \
             --tag ghcr.io/${{ github.repository }}:latest-arm64 \
             --push .
-          DIGEST=$(docker buildx imagetools inspect ghcr.io/${{ github.repository }}:latest-arm64 --format '{{.Digest}}')
+          DIGEST=$(docker buildx imagetools inspect --json ghcr.io/${{ github.repository }}:latest-arm64 | jq -r '.digest')
           echo "arm64_digest=$DIGEST" >> $GITHUB_OUTPUT
 
   manifest:
