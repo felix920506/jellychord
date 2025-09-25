@@ -106,5 +106,5 @@ jobs:
         uses: Noelware/docker-manifest-action@master
         with:
             inputs: ghcr.io/felix920506/jellychord:latest
-            images: ghcr.io/felix920506/jellychord:latest-amd64,ghcr.io/felix920506/jellychord:latest-arm64
+            tags: ghcr.io/felix920506/jellychord:latest-amd64,ghcr.io/felix920506/jellychord:latest-arm64
             push: true
