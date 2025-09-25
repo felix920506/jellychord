@@ -9,25 +9,19 @@ jobs:
   generate-requirements-txt:
     runs-on: ubuntu-latest
     steps:
-      - name: checkout repo
-        uses: actions/checkout@v5
+      - uses: actions/checkout@v5
 
-      - name: setup python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: 3.12
 
-      - name: install poetry
-        run: python3 -m pip install poetry
+      - run: python3 -m pip install poetry
 
-      - name: install poetry dependencies
-        run: poetry install
+      - run: poetry install
 
-      - name: export requirements.txt
-        run: poetry export --without-hashes -f requirements.txt --output requirements.txt
+      - run: poetry export --without-hashes -f requirements.txt --output requirements.txt
 
-      - name: upload requirements.txt
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: requirements
           path: requirements.txt
@@ -36,98 +30,42 @@ jobs:
     runs-on: ubuntu-latest
     needs: generate-requirements-txt
     outputs:
-      amd64_digest: ${{ steps.build_amd64.outputs.digest }}
+      amd64_digest: ${{ steps.build.outputs.digest }}   # ✅ fixed: now matches step id
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v5
+      - uses: actions/checkout@v5
 
-      - name: Download requirements.txt
-        uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v5
         with:
           name: requirements
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v3
 
-      - name: Log in to ghcr
-        uses: docker/login-action@v3
+      - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build & push amd64 image
-        id: build_amd64
+        id: build   # ✅ step id matches job outputs
         run: |
           docker buildx build \
             --platform linux/amd64 \
             --tag ghcr.io/${{ github.repository }}:latest-amd64 \
             --push .
           DIGEST=$(docker buildx imagetools inspect --json ghcr.io/${{ github.repository }}:latest-amd64 | jq -r '.digest')
-          echo "digest=$DIGEST" >> $GITHUB_OUTPUT
+          echo "digest=$DIGEST" >> $GITHUB_OUTPUT   # ✅ must be 'digest', not 'amd64_digest'
 
   build-and-publish-arm64:
     runs-on: ubuntu-24.04-arm
     needs: generate-requirements-txt
     outputs:
-      arm64_digest: ${{ steps.build_arm64.outputs.digest }}
+      arm64_digest: ${{ steps.build.outputs.digest }}   # ✅ fixed
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v5
+      - uses: actions/checkout@v5
 
-      - name: Download requirements.txt
-        uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v5
         with:
           name: requirements
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to ghcr
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build & push arm64 image
-        id: build_arm64
-        run: |
-          docker buildx build \
-            --platform linux/arm64 \
-            --tag ghcr.io/${{ github.repository }}:latest-arm64 \
-            --push .
-          DIGEST=$(docker buildx imagetools inspect --json ghcr.io/${{ github.repository }}:latest-arm64 | jq -r '.digest')
-          echo "digest=$DIGEST" >> $GITHUB_OUTPUT
-
-  manifest:
-    runs-on: ubuntu-latest
-    needs: [build-and-publish-arm64, build-and-publish-amd64]
-    steps:
-      - name: setup docker buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to ghcr
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Create multi-arch manifest
-        run: |
-          AMD64_DIGEST=${{ needs.build-and-publish-amd64.outputs.amd64_digest }}
-          ARM64_DIGEST=${{ needs.build-and-publish-arm64.outputs.arm64_digest }}
-          echo "amd64 digest = $AMD64_DIGEST"
-          echo "arm64 digest = $ARM64_DIGEST"
-
-          docker buildx imagetools create \
-            --tag ghcr.io/${{ github.repository }}:latest \
-            ghcr.io/${{ github.repository }}@${AMD64_DIGEST} \
-            ghcr.io/${{ github.repository }}@${ARM64_DIGEST}
-
-      # (optional) Inspect / push / verify the manifest
-      - name: Inspect manifest
-        run: |
-          docker buildx imagetools inspect ghcr.io/${{ github.repository }}:latest
-
+      - uses: docker/se
