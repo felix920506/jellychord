@@ -27,7 +27,7 @@ jobs:
         run: poetry export --without-hashes -f requirements.txt --output requirements.txt
 
       - name: upload requirements.txt
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: requirements
           path: requirements.txt
@@ -40,7 +40,7 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Download requirements.txt
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v6
         with:
           name: requirements
 
@@ -68,7 +68,7 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Download requirements.txt
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v6
         with:
           name: requirements
 
