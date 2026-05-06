@@ -69,9 +69,6 @@ Steps:
 9. run `poetry run python3 main.py` to start the bot. You may need to run `poetry run python main.py` if you are on Windows.
 10. Press `Ctrl+C` in the terminal window to exit the bot. MacOS uses the same key bind.
 
-It is normal to see these messages in the console. This is caused by a problem in Pycord and will be fixed in a future release of Pycord. Please ignore these warnings.
-<img width="1001" alt="Codec AVOption b (set bitrate (in bits/s)) has not been used for any stream. The most likely reason is either wrong type (e.g. a video option with no video streams) or that it is a private option of some encoder which was not actually used for any stream." src="https://github.com/user-attachments/assets/59b9deb5-d250-4012-bb88-20eb2b948e5d">
-
 ## Commands
 
 This list will assume the default prefix of `jellychord`. This can be changed in the config.
