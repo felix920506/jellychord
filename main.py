@@ -482,7 +482,7 @@ async def remove(ctx: discord.ApplicationContext,
     global queues
     guildqueue = getFlattenedPlayQueue(ctx.guild_id)
     if not ctx.guild_id in queues:
-        await ctx.respond('Queue is empty')
+        await ctx.respond('Queue is empty', ephemeral=True)
     elif len(guildqueue) < index:
         await ctx.respond('Specified index does not exist')
     else:
@@ -508,27 +508,51 @@ async def remove(ctx: discord.ApplicationContext,
 async def promote(ctx: discord.ApplicationContext,
                   index: discord.Option(int, min_value = 1)):
     global queues
+    guildqueue = getFlattenedPlayQueue(ctx.guild_id)
     if not ctx.guild_id in queues:
-        await ctx.respond('Playlist is empty')
-    elif len(queues[ctx.guild_id]) < index:
-        await ctx.respond('Specified index does not exist')
+        await ctx.respond('Queue is empty', ephemeral=True)
+    elif len(guildqueue) < index:
+        await ctx.respond('Specified index does not exist', ephemeral=True)
     else:
-        item = queues[ctx.guild_id].pop(index-1)
-        queues[ctx.guild_id].insert(0, item)
-        await ctx.respond(f'Promoted track to the front: {getTrackString(item)}')
+        if not config.get('fairplay'):
+            item = queues[ctx.guild_id].pop(index-1)
+            queues[ctx.guild_id].insert(0, item)
+            await ctx.respond(f'Promoted track to the front: {getTrackString(item)}')
+        else:
+            target = guildqueue[index-1]
+            for item in queues[ctx.guild_id][ctx.author.id]:
+                if item['Id'] == target['Id']:
+                    queues[ctx.guild_id][ctx.author.id].remove(item)
+                    queues[ctx.guild_id][ctx.author.id].insert(0, item)
+                    await ctx.respond(f'Promoted track to the front of your tracks: {getTrackString(item)}')
+                    return
+            else:
+                await ctx.respond('You can only promote your own tracks in fairplay mode', ephemeral=True)
 
 @cmdgrp.command()
 async def demote(ctx: discord.ApplicationContext,
-                 index: discord.Option(int, min_value = 1)):
+                  index: discord.Option(int, min_value = 1)):
     global queues
-    if ctx.guild_id not in queues:
-        await ctx.respond('Playlist is empty')
-    elif len(queues[ctx.guild_id]) < index:
-        await ctx.respond('Specified index does not exist')
+    guildqueue = getFlattenedPlayQueue(ctx.guild_id)
+    if not ctx.guild_id in queues:
+        await ctx.respond('Queue is empty')
+    elif len(guildqueue) < index:
+        await ctx.respond('Specified index does not exist', ephemeral=True)
     else:
-        item = queues[ctx.guild_id].pop(index-1)
-        queues[ctx.guild_id].append(item)
-        await ctx.respond(f'Promoted track to the front: {getTrackString(item)}')
+        if not config.get('fairplay'):
+            item = queues[ctx.guild_id].pop(index-1)
+            queues[ctx.guild_id].append(item)
+            await ctx.respond(f'Demoted track to the back: {getTrackString(item)}')
+        else:
+            target = guildqueue[index-1]
+            for item in queues[ctx.guild_id][ctx.author.id]:
+                if item['Id'] == target['Id']:
+                    queues[ctx.guild_id][ctx.author.id].remove(item)
+                    queues[ctx.guild_id][ctx.author.id].insert(-1, item)
+                    await ctx.respond(f'Demoted track to the back of your tracks: {getTrackString(item)}')
+                    return
+            else:
+                await ctx.respond('You can only demote your own tracks in fairplay mode', ephemeral=True)
 
 if not config.get('fairplay'):
     # playnow command is disabled in fairplay mode since it would defeat the whole point
