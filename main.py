@@ -80,9 +80,13 @@ async def playHelperGeneric(item: dict, ctx: discord.ApplicationContext, positio
     else:
         entries = [getItemEntry(item)]
     
+    # insert the item(s) into the queue
     global queues
+    # ensure the queue for the guild (server) exists
     if not ctx.guild_id in queues:
         queues[ctx.guild_id] = []
+
+    # insert into appropriate position in the queue
     if position == 'last':
         queues[ctx.guild_id].extend(entries)
     else:
@@ -114,7 +118,7 @@ def playNextTrack(guild, error=None):
     global playing
     global queues
     if guild.id in queues:
-        playing[guild.id] = queues[guild.id].pop(0)
+        playing[guild.id] = queues[guild.id].pop(0) # grab the next item off the queue to play
         playing[guild.id]['playtime-offset'] = datetime.timedelta()
         if not queues[guild.id]: 
             queues.pop(guild.id)
