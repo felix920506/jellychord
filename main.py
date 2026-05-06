@@ -139,6 +139,7 @@ def playNextTrack(guild, error=None):
             queues.pop(guild.id)
         url = JF_APICLIENT.getAudioHls(playing[guild.id]["Id"],br)
         audio = discord.FFmpegOpusAudio(url, codec='copy')
+        audio.read()
         playing[guild.id]['starttime'] = datetime.datetime.now()
         playing[guild.id]['paused'] = False
         vc.play(audio, after=lambda e: playNextTrack(guild, e))
