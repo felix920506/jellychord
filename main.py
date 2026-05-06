@@ -64,35 +64,22 @@ async def searchHelper(term: str, limit: int = LIMIT, searchType:str = None):
     res = await JF_APICLIENT.search(term, limit, searchType)
     return res
 
-async def playHelperTrack(item: dict, ctx: discord.ApplicationContext, position: str):
-    entry = {
+def getItemEntry(item: dict) -> dict:
+    return {
         "Artists": item["Artists"],
         "Name": item["Name"],
         "Id": item['Id'],
         "Length": item['RunTimeTicks'] // 10000000
     }
-    global queues
-    if not ctx.guild_id in queues:
-        queues[ctx.guild_id] = []
-    if position == 'last':
-        queues[ctx.guild_id].append(entry)
+
+async def playHelperGeneric(item: dict, ctx: discord.ApplicationContext, position: str):
+    entries = []
+    if item["Type"] == "MusicAlbum":
+        tracks = await JF_APICLIENT.getAlbumTracks(item['Id'])
+        entries = [getItemEntry(i) for i in tracks]
     else:
-        queues[ctx.guild_id].insert(0, entry)
-
-    if not ctx.voice_client:
-        await startPlayer(ctx)
-    elif position == 'now':
-        ctx.voice_client.stop()
-
-async def playHelperAlbum(item: dict, ctx: discord.ApplicationContext, position: str):
-    tracks = await JF_APICLIENT.getAlbumTracks(item['Id'])
-    entries = [{
-        "Artists": item["Artists"],
-        "Name": item["Name"],
-        "Id": item['Id'],
-        "Length": item['RunTimeTicks'] // 10000000
-    } for item in tracks]
-
+        entries = [getItemEntry(item)]
+    
     global queues
     if not ctx.guild_id in queues:
         queues[ctx.guild_id] = []
@@ -105,12 +92,6 @@ async def playHelperAlbum(item: dict, ctx: discord.ApplicationContext, position:
         await startPlayer(ctx)
     elif position == 'now':
         ctx.voice_client.stop()
-
-async def playHelperGeneric(item: dict, ctx: discord.ApplicationContext, position: str):
-    if item["Type"] == "MusicAlbum":
-        await playHelperAlbum(item, ctx, position)
-    else:
-        await playHelperTrack(item, ctx, position)
 
 async def startPlayer(ctx: discord.ApplicationContext):
     vc = ctx.voice_client
