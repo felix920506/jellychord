@@ -8,6 +8,7 @@ Jellyfin music bot for Discord. Name courtesy of [@thornbill](https://github.com
 - Supports multiple channels / servers playing at the same time
 - Transcoding on the Jellyfin server reduces network traffic
 - Fairplay mode: Users take turns listening to tracks they choose
+- Support for Discord DAVE E2EE Voice protocol
 
 ## Requirements
 
