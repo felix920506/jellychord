@@ -7,6 +7,7 @@ Jellyfin music bot for Discord. Name courtesy of [@thornbill](https://github.com
 - Listen to music in your Jellyfin library in Discord channels
 - Supports multiple channels / servers playing at the same time
 - Transcoding on the Jellyfin server reduces network traffic
+- Fairplay mode: Users take turns listening to tracks they choose
 
 ## Requirements
 
@@ -40,6 +41,7 @@ services:
       JELLYCHORD_JF_APIKEY: your_jellyfin_apikey
       JELLYCHORD_COMMAND_GROUP: jellychord
       JELLYCHORD_SEARCH_LIMIT: 25
+      JELLYCHORD_ENABLE_FAIRPLAY: 0
 ```
 
 This can also be found in the repository as `compose.yaml`
@@ -102,7 +104,7 @@ This list will assume the default prefix of `jellychord`. This can be changed in
 - `/jellychord demote <index>`
   Demotes the item at the specified index from the playlist to the back. Index starts with 1.
 - `/jellychord playnow <index>`
-  Skips the current playing track and play the specified index from the playlist. Index starts with 1. This does NOT discard tracks before the specified index. How this works is promote the specified index then skip the current track.
+  Skips the current playing track and play the specified index from the playlist. Index starts with 1. This does NOT discard tracks before the specified index. How this works is promote the specified index then skip the current track. This is disabled in fairplay mode.
 
 ## Known limitations / issues / missing features
 
