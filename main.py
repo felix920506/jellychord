@@ -465,7 +465,16 @@ async def shuffle(ctx: discord.ApplicationContext):
         await ctx.respond('Playlist is empty')
     else:
         await ctx.respond('Shuffling playlist')
-        random.shuffle(queues[ctx.guild_id])
+        if config.get('fairplay'):
+            for userId in queues[ctx.guild_id]:
+                random.shuffle(queues[ctx.guild_id][userId])
+
+            userIds = list(queues[ctx.guild_id].keys())
+            random.shuffle(userIds)
+            shuffledQueues = {uid: queues[ctx.guild_id][uid] for uid in userIds}
+            queues[ctx.guild_id] = shuffledQueues
+        else:
+            random.shuffle(queues[ctx.guild_id])
 
 @cmdgrp.command()
 async def remove(ctx: discord.ApplicationContext,
