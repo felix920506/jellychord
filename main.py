@@ -136,7 +136,7 @@ def playNextTrack(guild, error=None):
     global playing
     global queues
     if fairplay:
-        nextTrackUser: int = playing[guild.id]['nextTrackUser']
+        nextTrackUser: int = playing[guild.id]['nextTrackUser'] if guild.id in playing else list(queues[guild.id].keys())[0]
 
     if guild.id in queues:
         # grab the next item off the queue to play
@@ -533,6 +533,6 @@ if DEBUG:
     
     @dbgcmd.command()
     async def printplaylist(ctx: discord.ApplicationContext):
-        ctx.respond(queues.get(ctx.guild_id), ephemeral=True)
+        await ctx.respond(queues.get(ctx.guild_id, 'Playlist is empty'), ephemeral=True)
 
 bot.run(config['discord-token'])
