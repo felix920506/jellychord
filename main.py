@@ -480,15 +480,29 @@ async def shuffle(ctx: discord.ApplicationContext):
 async def remove(ctx: discord.ApplicationContext,
                  index: discord.Option(int, min_value = 1)):
     global queues
+    guildqueue = getFlattenedPlayQueue(ctx.guild_id)
     if not ctx.guild_id in queues:
         await ctx.respond('Queue is empty')
-    elif len(queues[ctx.guild_id]) < index:
+    elif len(guildqueue) < index:
         await ctx.respond('Specified index does not exist')
     else:
-        item = queues[ctx.guild_id].pop(index-1)
-        if not queues[ctx.guild_id]:
-            queues.pop(ctx.guild_id)
-        await ctx.respond(f'Deleted track: {getTrackString(item)}')
+        if not config.get('fairplay'):
+            item = queues[ctx.guild_id].pop(index-1)
+            if not queues[ctx.guild_id]:
+                queues.pop(ctx.guild_id)
+            await ctx.respond(f'Deleted track: {getTrackString(item)}')
+        else:
+            target = guildqueue[index-1]
+            for userId in queues[ctx.guild_id]:
+                for item in queues[ctx.guild_id][userId]:
+                    if item['Id'] == target['Id']:
+                        queues[ctx.guild_id][userId].remove(item)
+                        if not queues[ctx.guild_id][userId]:
+                            queues[ctx.guild_id].pop(userId)
+                        if not queues[ctx.guild_id]:
+                            queues.pop(ctx.guild_id)
+                        await ctx.respond(f'Deleted track: {getTrackString(item)}')
+                        return
 
 @cmdgrp.command()
 async def promote(ctx: discord.ApplicationContext,
