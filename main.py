@@ -5,6 +5,7 @@ import yaml
 import random
 import datetime
 import os
+from itertools import zip_longest
 
 from jfapi import JFAPI
 
@@ -207,6 +208,23 @@ def formatTimeSecs(secs: int, force_hrs: bool = False) -> str:
     else:
         return f'{m:02d}:{s:02d}'
 
+def getFlattenedPlayQueue(guildId: int) -> list[dict]:
+    if not guildId in queues:
+        return []
+    if not config.get('fairplay'):
+        return queues[guildId]
+    else:
+        nextTrackUserIdx = playing[guildId].get('nextTrackUserIdx') % len(queues[guildId])
+        userIds = list(queues[guildId].keys())
+        orderedUserIds = userIds[nextTrackUserIdx:]+userIds[:nextTrackUserIdx]
+        orderedTrackLists = [queues[guildId][uid] for uid in orderedUserIds]
+
+        tracks = []
+        for i in zip_longest(*orderedTrackLists, fillvalue=None):
+            tracks.extend([j for j in i if j is not None])
+
+        return tracks
+
 '''
 Discord View Related
 '''
@@ -239,9 +257,9 @@ class listDropdown(discord.ui.Select):
         self.update_options(pages)
     
     async def callback(self, interaction: discord.Interaction):
-        pages = len(queues[interaction.guild_id])//PLAYLIST_PAGESIZE+1
+        pages = len(getFlattenedPlayQueue(interaction.guild_id))//PLAYLIST_PAGESIZE+1
         page = int(self._selected_values[0])-1
-        tracks = queues[interaction.guild_id][page*PLAYLIST_PAGESIZE:page*PLAYLIST_PAGESIZE+PLAYLIST_PAGESIZE]
+        tracks = getFlattenedPlayQueue(interaction.guild_id)[page*PLAYLIST_PAGESIZE:page*PLAYLIST_PAGESIZE+PLAYLIST_PAGESIZE]
         strs = [f'{i+page*PLAYLIST_PAGESIZE+1}. {getTrackString(tracks[i])}' for i in range(len(tracks))]
         self.view.page = page
         self.view.updateItems(pages)
@@ -256,10 +274,10 @@ class listPrevButton(discord.ui.Button):
         self.label = '◁'
 
     async def callback(self, interaction: discord.Interaction):
-        pages = len(queues[interaction.guild_id])//PLAYLIST_PAGESIZE+1
+        pages = len(getFlattenedPlayQueue(interaction.guild_id))//PLAYLIST_PAGESIZE+1
         self.view.page -= 1
         page = self.view.page
-        tracks = queues[interaction.guild_id][page*PLAYLIST_PAGESIZE:page*PLAYLIST_PAGESIZE+PLAYLIST_PAGESIZE]
+        tracks = getFlattenedPlayQueue(interaction.guild_id)[page*PLAYLIST_PAGESIZE:page*PLAYLIST_PAGESIZE+PLAYLIST_PAGESIZE]
         strs = [f'{i+page*PLAYLIST_PAGESIZE+1}. {getTrackString(tracks[i])}' for i in range(len(tracks))]
         self.view.updateItems(pages)
         await interaction.response.edit_message(content=f'Tracks in playlist:\n{"\n".join(strs)}\nPage: {page+1}/{pages}', view=self.view)
@@ -270,10 +288,10 @@ class listNextButton(discord.ui.Button):
         self.label = '▷'
 
     async def callback(self, interaction: discord.Interaction):
-        pages = len(queues[interaction.guild_id])//PLAYLIST_PAGESIZE+1
+        pages = len(getFlattenedPlayQueue(interaction.guild_id))//PLAYLIST_PAGESIZE+1
         self.view.page += 1
         page = self.view.page
-        tracks = queues[interaction.guild_id][page*PLAYLIST_PAGESIZE:page*PLAYLIST_PAGESIZE+PLAYLIST_PAGESIZE]
+        tracks = getFlattenedPlayQueue(interaction.guild_id)[page*PLAYLIST_PAGESIZE:page*PLAYLIST_PAGESIZE+PLAYLIST_PAGESIZE]
         strs = [f'{i+page*PLAYLIST_PAGESIZE+1}. {getTrackString(tracks[i])}' for i in range(len(tracks))]
         self.view.updateItems(pages)
         await interaction.response.edit_message(content=f'Tracks in playlist:\n{"\n".join(strs)}\nPage: {page+1}/{pages}', view=self.view)
@@ -285,9 +303,9 @@ class listRefreshButton(discord.ui.Button):
         self.label = '⟳'
     
     async def callback(self, interaction: discord.Interaction):
-        pages = len(queues[interaction.guild_id])//PLAYLIST_PAGESIZE+1
+        pages = len(getFlattenedPlayQueue(interaction.guild_id))//PLAYLIST_PAGESIZE+1
         page = self.view.page
-        tracks = queues[interaction.guild_id][page*PLAYLIST_PAGESIZE:page*PLAYLIST_PAGESIZE+PLAYLIST_PAGESIZE]
+        tracks = getFlattenedPlayQueue(interaction.guild_id)[page*PLAYLIST_PAGESIZE:page*PLAYLIST_PAGESIZE+PLAYLIST_PAGESIZE]
         strs = [f'{i+page*PLAYLIST_PAGESIZE+1}. {getTrackString(tracks[i])}' for i in range(len(tracks))]
         self.view.updateItems(pages)
         await interaction.response.edit_message(content=f'Tracks in playlist:\n{"\n".join(strs)}\nPage: {page+1}/{pages}', view=self.view)
@@ -382,7 +400,7 @@ async def nowplaying(ctx: discord.ApplicationContext):
 @cmdgrp.command()
 async def queue(ctx: discord.ApplicationContext):
     if ctx.guild_id in queues:
-        tracks = queues[ctx.guild_id]
+        tracks = getFlattenedPlayQueue(ctx.guild_id)
         strs = [f'{i}. {getTrackString(tracks[i])}' for i in range(min(len(tracks), PLAYLIST_PAGESIZE))]
         await ctx.respond(f'Tracks in playlist:\n{"\n".join(strs)}\nPage: 1/{len(tracks)//PLAYLIST_PAGESIZE+1}', view=listView(len(tracks)//PLAYLIST_PAGESIZE+1))
     else:
