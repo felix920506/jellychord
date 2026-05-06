@@ -138,10 +138,7 @@ def playNextTrack(guild, error=None):
         if not queues[guild.id]: 
             queues.pop(guild.id)
         url = JF_APICLIENT.getAudioHls(playing[guild.id]["Id"],br)
-        # use libopus until py-cord 2.7
-        # change to 'copy' after py-cord 2.7 is out
-        audio = discord.FFmpegOpusAudio(url, codec='libopus')
-        audio.read() # remove this line when py-cord 2.7 is out
+        audio = discord.FFmpegOpusAudio(url, codec='copy')
         playing[guild.id]['starttime'] = datetime.datetime.now()
         playing[guild.id]['paused'] = False
         vc.play(audio, after=lambda e: playNextTrack(guild, e))
