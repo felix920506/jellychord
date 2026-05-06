@@ -530,6 +530,9 @@ if DEBUG:
         else:
             await ctx.respond(f'Playing {getTrackString(res[0], showType=True)}')
             await playHelperGeneric(res[0], ctx, when)
-
+    
+    @dbgcmd.command()
+    async def printplaylist(ctx: discord.ApplicationContext):
+        ctx.respond(queues.get(ctx.guild_id), ephemeral=True)
 
 bot.run(config['discord-token'])
