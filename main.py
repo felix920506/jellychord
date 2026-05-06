@@ -122,7 +122,7 @@ async def startPlayer(ctx: discord.ApplicationContext):
 
 async def playTrack(guild: discord.Guild):
     vc = guild.voice_client
-    if vc.paused:
+    if vc.is_paused():
         vc.resume()
     else:
         await asyncio.to_thread(playNextTrack, guild)
