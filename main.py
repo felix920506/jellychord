@@ -80,17 +80,34 @@ async def playHelperGeneric(item: dict, ctx: discord.ApplicationContext, positio
     else:
         entries = [getItemEntry(item)]
     
+    fairplay = config.get('fairplay')
+
     # insert the item(s) into the queue
     global queues
     # ensure the queue for the guild (server) exists
     if not ctx.guild_id in queues:
-        queues[ctx.guild_id] = []
+        # fairplay requires per user queues, otherwise just one queue per guild
+        if not fairplay:
+            queues[ctx.guild_id] = []
+        else:
+            queues[ctx.guild_id] = {}
+
+    if fairplay:
+        if not ctx.author.id in queues[ctx.guild_id]:
+            queues[ctx.guild_id][ctx.author.id] = []
 
     # insert into appropriate position in the queue
-    if position == 'last':
-        queues[ctx.guild_id].extend(entries)
+    if not fairplay:
+        if position == 'last':
+            queues[ctx.guild_id].extend(entries)
+        else:
+            queues[ctx.guild_id][0:0] = entries
     else:
-        queues[ctx.guild_id][0:0] = entries
+        if position == 'last':
+            queues[ctx.guild_id][ctx.author.id].extend(entries)
+        else:
+            queues[ctx.guild_id][ctx.author.id][0:0] = entries
+
     
     if not ctx.voice_client:
         await startPlayer(ctx)
@@ -115,13 +132,34 @@ async def playTrack(guild: discord.Guild):
 def playNextTrack(guild, error=None):
     vc = guild.voice_client
     br = vc.channel.bitrate
+    fairplay = config.get('fairplay')
     global playing
     global queues
+    if fairplay:
+        nextTrackUser: int = playing[guild.id]['nextTrackUser']
+
     if guild.id in queues:
-        playing[guild.id] = queues[guild.id].pop(0) # grab the next item off the queue to play
+        # grab the next item off the queue to play
+        playing[guild.id] = queues[guild.id].pop(0) if not fairplay else queues[guild.id][nextTrackUser].pop(0)
+
         playing[guild.id]['playtime-offset'] = datetime.timedelta()
+        if fairplay:
+            # find the next user to play from
+            userIds = list(queues[guild.id].keys())
+            thisIdx = userIds.index(nextTrackUser) if nextTrackUser in userIds else -1
+            nextIdx = (thisIdx + 1) % len(userIds)
+            playing[guild.id]['nextTrackUser'] = userIds[nextIdx]
+
+            # clean up any empty queues for users
+            if not queues[guild.id][nextTrackUser]:
+                queues[guild.id].pop(nextTrackUser)
+
         if not queues[guild.id]: 
             queues.pop(guild.id)
+
+        if fairplay:
+            playing[guild.id]['nextTrackUser'] = None
+
         url = JF_APICLIENT.getAudioHls(playing[guild.id]["Id"],br)
         audio = discord.FFmpegOpusAudio(url, codec='copy')
         audio.read()
