@@ -2,6 +2,12 @@
 
 Jellyfin music bot for Discord. Name courtesy of [@thornbill](https://github.com/thornbill)
 
+## Features
+
+- Listen to music in your Jellyfin library in Discord channels
+- Supports multiple channels / servers playing at the same time
+- Transcoding on the Jellyfin server reduces network traffic
+
 ## Requirements
 
 Requirements related to the Jellyfin server:
