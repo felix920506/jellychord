@@ -136,23 +136,26 @@ def playNextTrack(guild, error=None):
     global playing
     global queues
     if fairplay:
-        nextTrackUser: int = playing[guild.id]['nextTrackUser'] if guild.id in playing else list(queues[guild.id].keys())[0]
-
-    if guild.id in queues:
+        thisTrackUserIdx = playing[guild.id].get('nextTrackUserIdx', 0) % len(queues[guild.id]) if guild.id in playing else 0
+        thisTrackUser = list(queues[guild.id].keys())[thisTrackUserIdx] if guild.id in playing else None
+        if thisTrackUser is None:
+            thisTrackUser = list(queues[guild.id].keys())[0] if guild.id in queues else None
         # grab the next item off the queue to play
-        playing[guild.id] = queues[guild.id].pop(0) if not fairplay else queues[guild.id][nextTrackUser].pop(0)
+        playing[guild.id] = queues[guild.id].pop(0) if not fairplay else queues[guild.id][thisTrackUser].pop(0)
 
         playing[guild.id]['playtime-offset'] = datetime.timedelta()
         if fairplay:
             # find the next user to play from
             userIds = list(queues[guild.id].keys())
-            thisIdx = userIds.index(nextTrackUser) if nextTrackUser in userIds else -1
+            thisIdx = userIds.index(thisTrackUser) if thisTrackUser in userIds else -1
             nextIdx = (thisIdx + 1) % len(userIds)
-            playing[guild.id]['nextTrackUser'] = userIds[nextIdx]
 
             # clean up any empty queues for users
-            if not queues[guild.id][nextTrackUser]:
-                queues[guild.id].pop(nextTrackUser)
+            if not queues[guild.id][thisTrackUser]:
+                queues[guild.id].pop(thisTrackUser)
+                nextIdx -= 1
+
+            playing[guild.id]['nextTrackUserIdx'] = nextIdx
 
         if not queues[guild.id]: 
             queues.pop(guild.id)
