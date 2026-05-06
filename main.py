@@ -26,6 +26,7 @@ else:
         'command-group': os.getenv('JELLYCHORD_COMMAND_GROUP'),
         'search-limit': os.getenv('JELLYCHORD_SEARCH_LIMIT'),
         'enable-debug': os.getenv('JELLYCHORD_ENABLE_DEBUG') == '1',
+        'fairplay': os.getenv('JELLYCHORD_ENABLE_FAIRPLAY') == '1'
     }
 
     if not config['search-limit']:

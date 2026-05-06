@@ -16,6 +16,9 @@ command-group: "jellychord"
 # Setting too high may result in causing DoS attack on server
 search-limit: 25
 
+# Fairplay mode
+fairplay: false
+
 # debug mode
 # when debug mode is enabled, commands will only be exposed to the specified debug server
 # debug commands will also be enabled

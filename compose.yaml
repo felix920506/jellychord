@@ -7,3 +7,4 @@ services:
       JELLYCHORD_JF_APIKEY: your_jellyfin_apikey
       JELLYCHORD_COMMAND_GROUP: jellychord
       JELLYCHORD_SEARCH_LIMIT: 25
+      JELLYCHORD_ENABLE_FAIRPLAY: 0
