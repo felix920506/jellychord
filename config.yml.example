@@ -17,6 +17,7 @@ command-group: "jellychord"
 search-limit: 25
 
 # Fairplay mode
+# Gives each user a fair chance to play their tracks
 fairplay: false
 
 # debug mode
