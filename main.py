@@ -137,11 +137,11 @@ def playNextTrack(guild, error=None):
     fairplay = config.get('fairplay')
     global playing
     global queues
-    if fairplay:
-        thisTrackUserIdx = playing[guild.id].get('nextTrackUserIdx', 0) % len(queues[guild.id]) if guild.id in playing else 0
-        thisTrackUser = list(queues[guild.id].keys())[thisTrackUserIdx] if guild.id in playing else None
-        if thisTrackUser is None:
-            thisTrackUser = list(queues[guild.id].keys())[0] if guild.id in queues else None
+    if guild.id in queues:
+        thisTrackUser = None
+        if fairplay:
+            thisTrackUserIdx = playing[guild.id].get('nextTrackUserIdx', 0) % len(queues[guild.id]) if guild.id in playing else 0
+            thisTrackUser = list(queues[guild.id].keys())[thisTrackUserIdx]
         # grab the next item off the queue to play
         playing[guild.id] = queues[guild.id].pop(0) if not fairplay else queues[guild.id][thisTrackUser].pop(0)
 
@@ -172,7 +172,7 @@ def playNextTrack(guild, error=None):
         playing[guild.id]['paused'] = False
         vc.play(audio, after=lambda e: playNextTrack(guild, e))
     else:
-        playing.pop(guild.id)
+        playing.pop(guild.id, None)
         asyncio.run_coroutine_threadsafe(vc.disconnect(), vc.loop)
 
 def getTrackString(item: dict, artistLimit: int = 1, showType: bool = False, showSize: bool = False):
