@@ -55,6 +55,16 @@ def make_discord_stub():
         def run(self, token):
             self.run_token = token
 
+    class FakeFFmpegOpusAudio:
+        def __init__(self, url, **kwargs):
+            self.url = url
+            self.kwargs = kwargs
+            self.read_called = False
+
+        def read(self):
+            self.read_called = True
+            return b""
+
     def option(*args, **kwargs):
         return args[0] if args else object
 
@@ -64,7 +74,7 @@ def make_discord_stub():
     discord.ApplicationContext = type("ApplicationContext", (), {})
     discord.Interaction = type("Interaction", (), {})
     discord.Guild = type("Guild", (), {})
-    discord.FFmpegOpusAudio = object
+    discord.FFmpegOpusAudio = FakeFFmpegOpusAudio
     discord.ui = types.SimpleNamespace(Select=FakeSelect, Button=FakeButton, View=FakeView)
     discord.ext = discord_ext
     return discord, discord_ext
