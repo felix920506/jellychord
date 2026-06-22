@@ -121,5 +121,4 @@ I don't need myself but you are welcome to send PRs:
 
 > [!NOTE]
 > **AI Usage Disclosure**
-> 
-> ChatGPT and Gemini have been used to assist CI/CD and packaging in this project.
+> AI has been used in CI/CD, tests and coding assistance
