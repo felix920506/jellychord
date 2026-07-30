@@ -168,7 +168,6 @@ files = [
 
 [package.dependencies]
 frozenlist = ">=1.1.0"
-typing-extensions = {version = ">=4.2", markers = "python_version < \"3.13\""}
 
 [[package]]
 name = "attrs"
@@ -767,26 +766,26 @@ files = [
 
 [[package]]
 name = "py-cord"
-version = "2.8.0rc2"
+version = "2.8.1"
 description = "A Python wrapper for the Discord API"
 optional = false
-python-versions = "<3.14,>=3.10"
+python-versions = "<3.15,>=3.10"
 groups = ["main"]
 files = [
-    {file = "py_cord-2.8.0rc2-py3-none-any.whl", hash = "sha256:4ae96ceb5328d7a4cd6c5591a29c91157fa38f44e54e9ac2c9274d743092d597"},
-    {file = "py_cord-2.8.0rc2.tar.gz", hash = "sha256:19c27a2f70268427c32607089a3f7ead6e5267956ef502f3a268a0ee5ebbdc50"},
+    {file = "py_cord-2.8.1-py3-none-any.whl", hash = "sha256:8b97a61cceb4ca9000fc3ac1190fa4c45ef6a521d88707953f7eeadc1bd57071"},
+    {file = "py_cord-2.8.1.tar.gz", hash = "sha256:b1ebd22416941bbeccb6d26df5cbd65ff6b1d47fcbbc9652efae039e46e8a562"},
 ]
 
 [package.dependencies]
 aiohttp = ">=3.13.2,<4.0"
 davey = {version = ">=0.1.4,<1", optional = true, markers = "extra == \"voice\""}
-PyNaCl = {version = ">=1.6,<1.7", optional = true, markers = "extra == \"voice\""}
+PyNaCl = {version = ">=1.6.2,<1.7", optional = true, markers = "extra == \"voice\""}
 typing_extensions = ">=4.12.0,<5"
 
 [package.extras]
-docs = ["furo (==2025.12.19) ; python_version >= \"3.13\"", "levenshtein (==0.27.3) ; python_version >= \"3.13\"", "myst-parser[linkify] (==5.0.0) ; python_version >= \"3.13\"", "sphinx (==9.1.0) ; python_version >= \"3.13\"", "sphinx-autodoc-typehints (==3.9.9) ; python_version >= \"3.13\"", "sphinx-copybutton (==0.5.2) ; python_version >= \"3.13\"", "sphinx-intl (==2.3.2) ; python_version >= \"3.13\"", "sphinxcontrib-websupport (==2.0.0) ; python_version >= \"3.13\"", "sphinxcontrib_trio (==1.2.0) ; python_version >= \"3.13\"", "sphinxext-opengraph (==0.13.0) ; python_version >= \"3.13\"", "typing_extensions (==4.15.0) ; python_version >= \"3.13\""]
-speed = ["aiohttp[speedups]", "msgspec (>=0.20.0,<0.21.0)"]
-voice = ["PyNaCl (>=1.6,<1.7)", "davey (>=0.1.4,<1)"]
+docs = ["furo (==2025.12.19) ; python_version >= \"3.13\"", "levenshtein (==0.27.3) ; python_version >= \"3.13\"", "myst-parser[linkify] (==5.1.0) ; python_version >= \"3.13\"", "sphinx (==9.1.0) ; python_version >= \"3.13\"", "sphinx-autodoc-typehints (==3.12.1) ; python_version >= \"3.13\"", "sphinx-copybutton (==0.5.2) ; python_version >= \"3.13\"", "sphinx-intl (==2.3.2) ; python_version >= \"3.13\"", "sphinxcontrib-websupport (==2.0.0) ; python_version >= \"3.13\"", "sphinxcontrib_trio (==1.2.0) ; python_version >= \"3.13\"", "sphinxext-opengraph (==0.13.0) ; python_version >= \"3.13\"", "typing_extensions (==4.16.0) ; python_version >= \"3.13\""]
+speed = ["aiohttp[speedups]", "msgspec (>=0.21.0,<0.22.0)"]
+voice = ["PyNaCl (>=1.6.2,<1.7)", "davey (>=0.1.4,<1)"]
 
 [[package]]
 name = "pycparser"
@@ -1083,5 +1082,5 @@ propcache = ">=0.2.1"
 
 [metadata]
 lock-version = "2.1"
-python-versions = ">=3.12, <3.13"
-content-hash = "5f98557afc4b9e6648ff1d5b57781e32d0de89fd145d007d26b11b4b07bf7e46"
+python-versions = ">=3.14, <3.15"
+content-hash = "75ad4cb0fe3f1c20ee4e2d2b0545dd0bd6553a1609033e8227c834fbbffa8455"
