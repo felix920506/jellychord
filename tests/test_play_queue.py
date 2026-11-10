@@ -51,7 +51,12 @@ class FakeVoiceClient:
     records the after= callback instead of starting a player thread. The
     first play_failures calls to play() raise. The first half_start_failures
     calls raise after storing the player, like py-cord 2.8.1 when the player
-    thread fails to start: is_playing() is True, but after= is never called."""
+    thread fails to start: is_playing() is True, but after= is never called.
+
+    drop_connection()/recover_connection() model py-cord losing and
+    recovering the connection on the same client, and player_times_out()
+    models its player giving up on a dropped connection. If guild is set,
+    disconnect() removes the client from it, like py-cord's cleanup."""
 
     def __init__(self, bitrate=96_000, play_failures=0, half_start_failures=0):
         self.channel = types.SimpleNamespace(bitrate=bitrate)
@@ -65,6 +70,8 @@ class FakeVoiceClient:
         self.disconnect_requested = False
         self._playing = False
         self._paused = False
+        self._player_exited = False
+        self.guild = None
 
     def is_connected(self):
         return self.connected
@@ -90,6 +97,7 @@ class FakeVoiceClient:
             raise RuntimeError("can't start new thread")
         self._playing = True
         self._paused = False
+        self._player_exited = False
         self.play_calls.append((audio, after))
 
     def pause(self):
@@ -101,10 +109,11 @@ class FakeVoiceClient:
 
     def stop(self):
         self.stopped = True
-        was_playing = self._playing and not self._half_started
+        was_playing = self._playing and not self._half_started and not self._player_exited
         self._playing = False
         self._paused = False
         self._half_started = False
+        self._player_exited = False
         if was_playing:
             # py-cord's player thread calls after= once it notices the stop
             self._call_after()
@@ -113,6 +122,19 @@ class FakeVoiceClient:
         """End the current track naturally."""
         self._playing = False
         self._paused = False
+        self._call_after()
+
+    def drop_connection(self):
+        self.connected = False
+
+    def recover_connection(self):
+        self.connected = True
+
+    def player_times_out(self):
+        """Like py-cord 2.8.1's AudioPlayer when wait_until_connected() fails:
+        the thread calls after=(None) and exits without stop(), so
+        is_playing() stays True."""
+        self._player_exited = True
         self._call_after()
 
     def _call_after(self):
@@ -125,6 +147,8 @@ class FakeVoiceClient:
     async def disconnect(self, force=False):
         self.disconnect_requested = True
         self.connected = False
+        if self.guild is not None and self.guild.voice_client is self:
+            self.guild.voice_client = None
 
 
 class FakeContext:
@@ -1546,6 +1570,262 @@ class VoiceStateListenerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn(42, self.main.queues)
         self.assertIn(42, self.main.playing)
+
+
+class VoiceOutageTests(unittest.IsolatedAsyncioTestCase):
+    """After a voice outage, playback resumes once py-cord recovers the
+    connection, or the bot gives up and leaves cleanly (#64)."""
+
+    BOT_ID = 999
+
+    @classmethod
+    def setUpClass(cls):
+        cls.main = import_main_with_stubs()
+
+    def setUp(self):
+        for state in (self.main.queues, self.main.playing, self.main.loading, self.main.playerLocks,
+                      self.main.expectedDisconnects, self.main.voiceEpochs, self.main.currentPlayers):
+            state.clear()
+        self.main.config["fairplay"] = False
+        self.main.JF_APICLIENT = FakeJFAPI()
+        self.main.bot.user = types.SimpleNamespace(id=self.BOT_ID)
+        self.patch_constant("VOICE_POLL_INTERVAL", 0.005)
+        self.patch_constant("VOICE_OUTAGE_TIMEOUT", 5)
+
+    def patch_constant(self, name, value):
+        patch = mock.patch.object(self.main, name, value)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    async def asyncTearDown(self):
+        # every advanceTrack started by a callback has finished: nothing leaks
+        await self.wait_for(lambda: len(asyncio.all_tasks()) == 1)
+
+    async def wait_for(self, predicate, timeout=5):
+        async with asyncio.timeout(timeout):
+            while not predicate():
+                await asyncio.sleep(0.01)
+
+    async def start(self, track_ids):
+        voice_client = FakeVoiceClient()
+        guild = types.SimpleNamespace(id=42, voice_client=voice_client)
+        voice_client.guild = guild
+        self.main.queues[42] = [queue_entry(track_id) for track_id in track_ids]
+        await self.main.advanceTrack(guild)
+        self.assertEqual(self.main.playing[42]["Id"], track_ids[0])
+        return voice_client, guild
+
+    def context(self, guild):
+        ctx = FakeContext(voice_client=guild.voice_client)
+        ctx.guild = guild
+        return ctx
+
+    async def bot_voice_state_update(self, guild, before, after):
+        await self.main.onVoiceStateUpdate(
+            types.SimpleNamespace(id=self.BOT_ID, guild=guild),
+            types.SimpleNamespace(channel=before),
+            types.SimpleNamespace(channel=after),
+        )
+
+    async def assert_still_waiting(self, voice_client, plays=1):
+        await asyncio.sleep(0.05)
+        self.assertEqual(len(voice_client.play_calls), plays)
+        self.assertFalse(voice_client.disconnect_requested)
+
+    async def test_track_end_while_disconnected_plays_next_after_recovery(self):
+        voice_client, guild = await self.start(["first", "second"])
+
+        voice_client.drop_connection()
+        voice_client.finish_track()
+        await self.assert_still_waiting(voice_client)
+        voice_client.recover_connection()
+
+        await self.wait_for(lambda: len(voice_client.play_calls) == 2)
+        self.assertEqual(self.main.playing[42]["Id"], "second")
+        self.assertNotIn(42, self.main.queues)
+
+    async def test_timed_out_player_is_cleared_and_next_track_plays_after_recovery(self):
+        voice_client, guild = await self.start(["first", "second"])
+
+        voice_client.drop_connection()
+        voice_client.player_times_out()
+        self.assertTrue(voice_client.is_playing())
+        await self.assert_still_waiting(voice_client)
+        with self.assertLogs("jellychord", "WARNING") as logs:
+            voice_client.recover_connection()
+            await self.wait_for(lambda: len(voice_client.play_calls) == 2)
+
+        self.assertIn("stopped after losing its connection", logs.output[0])
+        self.assertTrue(voice_client.stopped)
+        self.assertEqual(self.main.playing[42]["Id"], "second")
+
+    async def test_player_timing_out_just_as_connection_recovers_is_cleared(self):
+        voice_client, guild = await self.start(["first", "second"])
+
+        voice_client.drop_connection()
+        voice_client.recover_connection()
+        with self.assertLogs("jellychord", "WARNING"):
+            voice_client.player_times_out()
+            await self.wait_for(lambda: len(voice_client.play_calls) == 2)
+        self.assertEqual(self.main.playing[42]["Id"], "second")
+
+    async def test_late_callback_from_an_old_player_does_not_stop_the_current_one(self):
+        voice_client, guild = await self.start(["first", "second", "third"])
+        _, first_after = voice_client.play_calls[0]
+        voice_client.finish_track()
+        await self.wait_for(lambda: len(voice_client.play_calls) == 2)
+
+        thread = threading.Thread(target=first_after, args=(None,))
+        thread.start()
+        thread.join()
+        await self.wait_for(lambda: len(asyncio.all_tasks()) == 1)
+
+        self.assertFalse(voice_client.stopped)
+        self.assertEqual(len(voice_client.play_calls), 2)
+        self.assertEqual(self.main.playing[42]["Id"], "second")
+
+    async def test_connection_that_never_recovers_leaves_and_keeps_queue(self):
+        self.patch_constant("VOICE_OUTAGE_TIMEOUT", 0.05)
+        voice_client, guild = await self.start(["first", "second"])
+
+        voice_client.drop_connection()
+        with self.assertLogs("jellychord", "WARNING") as logs:
+            voice_client.player_times_out()
+            await self.wait_for(lambda: voice_client.disconnect_requested)
+            await self.wait_for(lambda: not self.main.playerLocks[42].locked())
+
+        self.assertTrue(any("did not recover" in line for line in logs.output))
+        self.assertIsNone(guild.voice_client)
+        self.assertNotIn(42, self.main.playing)
+        self.assertEqual(queue_ids(self.main.queues[42]), ["second"])
+        # the leave event for the bot's own disconnect keeps the queue
+        await self.bot_voice_state_update(guild, object(), None)
+        self.assertEqual(queue_ids(self.main.queues[42]), ["second"])
+
+        # and a later /start works
+        new_client = FakeVoiceClient()
+        ctx = self.context(guild)
+
+        async def connect():
+            guild.voice_client = new_client
+            return new_client
+
+        ctx.author.voice = types.SimpleNamespace(channel=types.SimpleNamespace(connect=connect))
+        await self.main.start(ctx)
+
+        self.assertEqual(ctx.responses, ["Starting Playback"])
+        self.assertEqual(len(new_client.play_calls), 1)
+        self.assertEqual(self.main.playing[42]["Id"], "second")
+
+    async def test_giving_up_stops_pycord_from_reconnecting(self):
+        self.patch_constant("VOICE_OUTAGE_TIMEOUT", 0.05)
+        voice_client, guild = await self.start(["first", "second"])
+        rejoined = []
+
+        async def reconnect_after_backoff():
+            # py-cord's reconnect task, asleep in its backoff
+            await asyncio.sleep(10)
+            rejoined.append(True)
+
+        runner = asyncio.create_task(reconnect_after_backoff())
+        self.addCleanup(runner.cancel)
+        voice_client._connection = types.SimpleNamespace(_runner=runner)
+
+        voice_client.drop_connection()
+        with self.assertLogs("jellychord", "WARNING"):
+            voice_client.player_times_out()
+            await self.wait_for(lambda: voice_client.disconnect_requested)
+        await asyncio.wait([runner], timeout=1)
+
+        self.assertTrue(runner.cancelled())
+        self.assertEqual(rejoined, [])
+
+    def test_cancel_voice_reconnect_tolerates_missing_internals(self):
+        class BrokenClient:
+            @property
+            def _connection(self):
+                raise RuntimeError("changed internals")
+
+        for voice_client in (
+            object(),
+            types.SimpleNamespace(_connection=None),
+            types.SimpleNamespace(_connection=types.SimpleNamespace()),
+            types.SimpleNamespace(_connection=types.SimpleNamespace(_runner=None)),
+            types.SimpleNamespace(_connection=types.SimpleNamespace(_runner="not a task")),
+            BrokenClient(),
+        ):
+            self.main.cancelVoiceReconnect(voice_client)
+
+    async def test_reconnect_leave_and_rejoin_events_keep_state_and_resume(self):
+        voice_client, guild = await self.start(["first", "second", "third"])
+        channel = object()
+
+        # py-cord's reconnect leaves voice, the player gives up, then py-cord
+        # rejoins with the same client
+        voice_client.drop_connection()
+        listener = asyncio.create_task(self.bot_voice_state_update(guild, channel, None))
+        voice_client.player_times_out()
+        await self.assert_still_waiting(voice_client)
+        with self.assertLogs("jellychord", "WARNING"):
+            voice_client.recover_connection()
+            await self.bot_voice_state_update(guild, None, channel)
+            await listener
+            await self.wait_for(lambda: len(voice_client.play_calls) == 2)
+        self.assertEqual(self.main.playing[42]["Id"], "second")
+        self.assertEqual(queue_ids(self.main.queues[42]), ["third"])
+
+    async def test_listener_waiting_on_reconnect_keeps_queue_when_bot_gives_up(self):
+        self.patch_constant("VOICE_OUTAGE_TIMEOUT", 0.05)
+        voice_client, guild = await self.start(["first", "second"])
+
+        voice_client.drop_connection()
+        # py-cord's reconnect left voice; the listener waits for it to recover
+        listener = asyncio.create_task(self.bot_voice_state_update(guild, object(), None))
+        with self.assertLogs("jellychord", "WARNING"):
+            voice_client.player_times_out()
+            await self.wait_for(lambda: voice_client.disconnect_requested)
+        # the bot was already out of the channel, so no new leave event comes
+        await listener
+
+        self.assertEqual(queue_ids(self.main.queues[42]), ["second"])
+
+    async def test_paused_player_waits_for_resume_then_recovers(self):
+        voice_client, guild = await self.start(["first", "second"])
+        ctx = self.context(guild)
+        await self.main.pause(ctx)
+
+        voice_client.drop_connection()
+        # a paused player doesn't notice the outage
+        await self.assert_still_waiting(voice_client)
+        self.assertTrue(voice_client.is_paused())
+
+        await self.main.resume(ctx)
+        # the resumed player finds no connection and gives up
+        voice_client.player_times_out()
+        await self.assert_still_waiting(voice_client)
+        with self.assertLogs("jellychord", "WARNING"):
+            voice_client.recover_connection()
+            await self.wait_for(lambda: len(voice_client.play_calls) == 2)
+
+        self.assertEqual(self.main.playing[42]["Id"], "second")
+        self.assertFalse(self.main.playing[42]["paused"])
+
+    async def test_resume_during_endless_outage_leaves_and_keeps_queue(self):
+        self.patch_constant("VOICE_OUTAGE_TIMEOUT", 0.05)
+        voice_client, guild = await self.start(["first", "second"])
+        ctx = self.context(guild)
+        await self.main.pause(ctx)
+        voice_client.drop_connection()
+
+        await self.main.resume(ctx)
+        with self.assertLogs("jellychord", "WARNING"):
+            voice_client.player_times_out()
+            await self.wait_for(lambda: voice_client.disconnect_requested)
+            await self.wait_for(lambda: not self.main.playerLocks[42].locked())
+
+        self.assertIsNone(guild.voice_client)
+        self.assertNotIn(42, self.main.playing)
+        self.assertEqual(queue_ids(self.main.queues[42]), ["second"])
 
 
 if __name__ == "__main__":
