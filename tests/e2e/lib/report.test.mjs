@@ -9,13 +9,13 @@ const quiet = () => {};
 test('a skipped step does not fail the run or open an issue', async () => {
   const report = new Report({ log: quiet });
   await report.step('gateway', 'bot logs in', async () => {});
-  report.skip('harness', 'stand-in probe', 'image predates e2e.as');
+  report.skip('harness', 'second driver probe', 'image predates extra drivers');
 
   const json = report.toJSON();
   assert.equal(json.ok, true);
   assert.equal(json.failure, null);
   assert.equal(json.steps[1].status, 'skipped');
-  assert.match(renderMarkdown(json), /⏭️ \| harness \| stand-in probe \(skipped: image predates e2e\.as\)/);
+  assert.match(renderMarkdown(json), /⏭️ \| harness \| second driver probe \(skipped: image predates extra drivers\)/);
 
   const reports = { image: json };
   assert.deepEqual(issueKeys(reports), []);
@@ -31,7 +31,7 @@ test('a skipped step does not fail the run or open an issue', async () => {
 
 test('a failed step after a skipped one is still the failure', async () => {
   const report = new Report({ log: quiet });
-  report.skip('harness', 'stand-in probe', 'image predates e2e.as');
+  report.skip('harness', 'second driver probe', 'image predates extra drivers');
   await assert.rejects(report.step('bot-behavior', 'stop', async () => { throw new Error('boom'); }));
 
   const json = report.toJSON();

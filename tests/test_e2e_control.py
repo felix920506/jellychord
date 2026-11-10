@@ -4,10 +4,11 @@ import types
 import unittest
 
 from jellychord import e2e_control
-from jellychord.e2e_control import ParseError, bind_arguments, format_reply, parse_request
+from jellychord.e2e_control import ParseError, bind_arguments, format_reply, parse_driver_ids, parse_request
 
 BOT_ID = 111
 DRIVER_ID = 222
+SECOND_ID = 555
 CHANNEL_ID = 333
 NONCE = 'run42'
 
@@ -90,6 +91,15 @@ class BindArgumentsTests(unittest.TestCase):
             bind_arguments(self.play, {'term': 'x', 'bogus': '1'})
 
 
+class ParseDriverIdsTests(unittest.TestCase):
+    def test_parses_comma_separated_ids(self):
+        self.assertEqual(parse_driver_ids('555, 666,'), [555, 666])
+
+    def test_unset_or_blank_is_empty(self):
+        self.assertEqual(parse_driver_ids(None), [])
+        self.assertEqual(parse_driver_ids(''), [])
+
+
 class FakeChannel:
     def __init__(self):
         self.id = CHANNEL_ID
@@ -135,13 +145,16 @@ class InstallTests(unittest.TestCase):
             command('silent', silent, []),
             command('broken', broken, []),
         ])
-        e2e_control.install(self.bot, group, driver_id=DRIVER_ID, channel_id=CHANNEL_ID, nonce=NONCE)
+        e2e_control.install(self.bot, group, driver_id=DRIVER_ID, channel_id=CHANNEL_ID, nonce=NONCE,
+                            extra_driver_ids=[SECOND_ID])
 
         self.member = types.SimpleNamespace(id=DRIVER_ID, voice='in-voice')
+        self.second = types.SimpleNamespace(id=SECOND_ID, voice=None)
+        members = {DRIVER_ID: self.member, SECOND_ID: self.second}
         self.guild = types.SimpleNamespace(
             id=444,
             voice_client=None,
-            get_member=lambda uid: self.member if uid == DRIVER_ID else None,
+            get_member=members.get,
         )
 
     def message(self, content, author_id=DRIVER_ID, channel=None):
@@ -198,19 +211,29 @@ class InstallTests(unittest.TestCase):
         self.assertIn('error UnknownCommand: nope', self.channel.sent[0][0])
         self.assertIn("error ParseError: missing required option 'term'", self.channel.sent[1][0])
 
-    def test_runs_command_as_stand_in_user(self):
-        self.send(f'<@{BOT_ID}> e2e {NONCE} r1 play term=x e2e.as=555')
+    def test_runs_command_as_the_extra_driver_with_its_own_voice_state(self):
+        self.send(f'<@{BOT_ID}> e2e {NONCE} r1 play term=x', author_id=SECOND_ID)
         ctx, term, searchtype, when = self.calls[0]
         self.assertEqual((term, searchtype, when), ('x', None, 'last'))
-        self.assertEqual(ctx.author.id, 555)
-        # everything else, voice state included, is the driver's
-        self.assertEqual(ctx.author.voice, 'in-voice')
-        self.assertEqual(self.member.id, DRIVER_ID)
+        self.assertIs(ctx.author, self.second)
+        self.assertIsNone(ctx.author.voice)
+        # the reply goes to whoever asked
+        self.assertEqual(self.channel.sent, [(f'<@{SECOND_ID}> e2e {NONCE} r1 Playing x', 'a-view')])
 
-    def test_rejects_non_numeric_stand_in_user(self):
-        self.send(f'<@{BOT_ID}> e2e {NONCE} r1 play term=x e2e.as=someone')
+    def test_parse_errors_mention_the_sender(self):
+        self.send(f'<@{BOT_ID}> e2e', author_id=SECOND_ID)
+        self.assertTrue(self.channel.sent[0][0].startswith(f'<@{SECOND_ID}> e2e parse-error '))
+
+    def test_builtin_drivers_lists_accepted_ids(self):
+        self.send(f'<@{BOT_ID}> e2e {NONCE} r1 drivers', author_id=SECOND_ID)
+        reply = self.channel.sent[0][0]
+        self.assertTrue(reply.startswith(f'<@{SECOND_ID}> e2e {NONCE} r1 drivers '))
+        self.assertEqual(json.loads(reply.split(' drivers ', 1)[1]), [str(DRIVER_ID), str(SECOND_ID)])
+
+    def test_e2e_as_is_no_longer_accepted(self):
+        self.send(f'<@{BOT_ID}> e2e {NONCE} r1 play term=x e2e.as=555')
         self.assertEqual(self.calls, [])
-        self.assertIn('error ParseError: e2e.as must be a numeric user ID', self.channel.sent[0][0])
+        self.assertIn('error ParseError: unknown option(s): e2e.as', self.channel.sent[0][0])
 
     def test_builtin_ping_and_diag(self):
         self.send(f'<@{BOT_ID}> e2e {NONCE} r6 ping')

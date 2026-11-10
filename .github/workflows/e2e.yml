@@ -142,6 +142,7 @@ jobs:
         env:
           E2E_SUT_TOKEN: ${{ secrets.E2E_SUT_TOKEN }}
           E2E_DRIVER_TOKEN: ${{ secrets.E2E_DRIVER_TOKEN }}
+          E2E_SECOND_DRIVER_TOKEN: ${{ secrets.E2E_SECOND_DRIVER_TOKEN }}
           E2E_GUILD_ID: ${{ secrets.E2E_GUILD_ID }}
           E2E_CONTROL_CHANNEL_ID: ${{ secrets.E2E_CONTROL_CHANNEL_ID }}
           E2E_VOICE_CHANNEL_ID: ${{ secrets.E2E_VOICE_CHANNEL_ID }}

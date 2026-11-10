@@ -19,6 +19,7 @@ daily on GitHub Actions and opens a GitHub issue when something breaks.
      ▲
      │  @mention control messages, voice receive
  listener bot (Node, discord.js + @discordjs/voice)
+ + second test bot (same process; a second user for fairplay)
 ```
 
 * **Fixtures.** The test library contains pure sine tones at distinct,
@@ -35,12 +36,15 @@ daily on GitHub Actions and opens a GitHub issue when something breaks.
   (`/jellychord ...` typed by a human, and the `/search` dropdown).
 * **Fairplay.** Fairplay is a startup setting, so the fairplay scenario
   restarts the bot with `JELLYCHORD_ENABLE_FAIRPLAY=1` and turns it off again
-  afterwards; every other scenario runs without it. There is only one Discord
-  account, so the second user is a stand-in: a control message may carry
-  `e2e.as=<user-id>` to run the command as that (made-up) user ID, sharing
-  the listener's voice state. A published image older than `e2e.as` rejects
-  it; on the `image` track the scenario is then recorded as skipped instead
-  of failing. Running from source, it always has to pass.
+  afterwards; every other scenario runs without it. The second user is a
+  second test bot account. The hook also accepts its control messages
+  (`JELLYCHORD_E2E_EXTRA_DRIVER_IDS`), and its commands run as that member,
+  with its own voice state: the scenario checks that it is refused while it
+  is out of voice, then has it join voice, start playback and queue tracks
+  alongside the listener. A published image older than extra drivers doesn't
+  know the hook's `drivers` command; on the `image` track the scenario is
+  then recorded as skipped instead of failing. Running from source, it always
+  has to pass.
 * **Listener in Node.** py-cord cannot receive audio over DAVE yet
   ([pycord#3139](https://github.com/Pycord-Development/pycord/issues/3139)),
   while `@discordjs/voice` can.
@@ -108,13 +112,16 @@ CI is split in two:
 1. **Test guild.** Create a Discord server used only for this, with one text
    channel (control) and one voice channel. Don't reuse a real server: the
    bots post there constantly.
-2. **Two bot applications** in the
+2. **Three bot applications** in the
    [Developer Portal](https://discord.com/developers/applications):
    * **Bot under test.** A dedicated bot, not your production bot, because
      the test registers guild commands and plays audio.
    * **Listener.**
+   * **Second test user.** Sends commands as a second user and joins voice
+     (deafened) in the fairplay scenario. It has to be a bot: automating a
+     user account is against Discord's terms.
 
-   Neither bot needs privileged intents. Invite both with the `bot` and
+   None of the bots needs privileged intents. Invite both with the `bot` and
    `applications.commands` scopes and these permissions on the two channels:
    View Channel, Send Messages, Read Message History, Connect, Speak.
 3. **Repository secrets** (Settings → Secrets and variables → Actions):
@@ -123,6 +130,7 @@ CI is split in two:
    |---|---|
    | `E2E_SUT_TOKEN` | token of the bot under test |
    | `E2E_DRIVER_TOKEN` | token of the listener bot |
+   | `E2E_SECOND_DRIVER_TOKEN` | token of the second test bot |
    | `E2E_GUILD_ID` | test guild ID |
    | `E2E_CONTROL_CHANNEL_ID` | control text channel ID |
    | `E2E_VOICE_CHANNEL_ID` | voice channel ID |
@@ -137,7 +145,7 @@ cd tests/e2e
 npm ci
 npm test                  # unit tests for the harness (no Discord needed)
 
-export E2E_SUT_TOKEN=... E2E_DRIVER_TOKEN=... E2E_GUILD_ID=... \
+export E2E_SUT_TOKEN=... E2E_DRIVER_TOKEN=... E2E_SECOND_DRIVER_TOKEN=... E2E_GUILD_ID=... \
        E2E_CONTROL_CHANNEL_ID=... E2E_VOICE_CHANNEL_ID=...
 export E2E_PYTHON="$(cd ../.. && poetry env info -p)/bin/python"
 E2E_SCENARIOS=smoke node run.mjs   # startup + one track (~2 min)

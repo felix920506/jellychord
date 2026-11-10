@@ -7,7 +7,8 @@ dedicated control channel. Everything after command dispatch (queueing,
 Jellyfin streaming, ffmpeg, the Discord voice connection) runs unchanged.
 
 The hook is inert unless ``JELLYCHORD_E2E_DRIVER_ID`` is set, and it only
-accepts messages from that exact user ID in the configured channel.
+accepts messages in the configured channel from that exact user ID, or from
+one listed in ``JELLYCHORD_E2E_EXTRA_DRIVER_IDS`` (comma-separated).
 
 Protocol (one message per request / reply)::
 
@@ -16,14 +17,13 @@ Protocol (one message per request / reply)::
 
 ``<command>`` is a subcommand of the command group (``play``, ``skip`` ...) or
 one of the built-in hook commands: ``diag`` (voice connection diagnostics),
-``versions`` (library versions) and ``ping``. On every ``on_ready`` the bot posts ``... e2e <run-nonce> - ready``.
+``versions`` (library versions), ``drivers`` (the accepted driver IDs) and
+``ping``. On every ``on_ready`` the bot posts ``... e2e <run-nonce> - ready``
+to the main driver.
 
-A subcommand request may also carry ``e2e.as=<user-id>``: the command then
-runs as if that user ID had sent it (``ctx.author.id``), with everything else
-about the author, voice state included, taken from the driver. The test only
-has one Discord account, so this stands in for a second user, e.g. to test
-fairplay's per-user rotation. ``.`` can't appear in a slash command option
-name, so the key never collides with a real option.
+A subcommand runs as the member who sent the request, voice state included,
+and the reply mentions that member. Extra drivers are further accounts, e.g.
+a second user to test fairplay's per-user rotation.
 """
 
 from __future__ import annotations
@@ -39,8 +39,6 @@ from typing import Any, Callable
 _log = logging.getLogger(__name__)
 
 PREFIX = 'e2e'
-# Hook-level request argument: run the command as another user ID.
-AS_USER_ARG = 'e2e.as'
 READY_REQUEST_ID = '-'
 MAX_MESSAGE_LEN = 2000
 
@@ -120,22 +118,9 @@ def _convert(option, value: str):
     return value
 
 
-class StandInAuthor:
-    """The driver member, but with another user ID: a second user as far as
-    the command handlers can tell. They only use the author's ID and voice."""
-
-    def __init__(self, member, user_id: int):
-        self._member = member
-        self.id = user_id
-
-    def __getattr__(self, name):
-        return getattr(self._member, name)
-
-
-def parse_user_id(value: str) -> int:
-    if not value.isdigit():
-        raise ParseError(f'{AS_USER_ARG} must be a numeric user ID, got {value!r}')
-    return int(value)
+def parse_driver_ids(value: str | None) -> list[int]:
+    """Parse a comma-separated list of user IDs; blank entries are ignored."""
+    return [int(part) for part in (value or '').split(',') if part.strip()]
 
 
 class ControlContext:
@@ -204,11 +189,13 @@ def library_versions() -> dict:
     return versions
 
 
-def install(bot, command_group, *, driver_id: int, channel_id: int, nonce: str):
+def install(bot, command_group, *, driver_id: int, channel_id: int, nonce: str,
+            extra_driver_ids=()):
     commands = {c.name: c for c in command_group.subcommands}
+    driver_ids = {driver_id, *extra_driver_ids}
 
-    async def reply(channel, request_id: str, text: str, view=None):
-        content = format_reply(driver_id, nonce, request_id, text)
+    async def reply(channel, request_id: str, text: str, view=None, to: int = driver_id):
+        content = format_reply(to, nonce, request_id, text)
         if view is not None:
             await channel.send(content, view=view)
         else:
@@ -219,18 +206,18 @@ def install(bot, command_group, *, driver_id: int, channel_id: int, nonce: str):
         await reply(channel, READY_REQUEST_ID, 'ready')
 
     async def on_message(message):
-        if message.author.id != driver_id or message.channel.id != channel_id or message.guild is None:
+        if message.author.id not in driver_ids or message.channel.id != channel_id or message.guild is None:
             return
         try:
             request = parse_request(message.content, bot.user.id)
         except ParseError as exc:
-            await message.channel.send(f'<@{driver_id}> {PREFIX} parse-error {exc}')
+            await message.channel.send(f'<@{message.author.id}> {PREFIX} parse-error {exc}')
             return
         if request is None or request.nonce != nonce:
             return
 
         async def respond(text, view=None):
-            await reply(message.channel, request.request_id, text, view)
+            await reply(message.channel, request.request_id, text, view, to=message.author.id)
 
         try:
             await _dispatch(request, message, respond)
@@ -245,6 +232,9 @@ def install(bot, command_group, *, driver_id: int, channel_id: int, nonce: str):
         if request.command == 'versions':
             await respond('versions ' + json.dumps(library_versions(), sort_keys=True))
             return
+        if request.command == 'drivers':
+            await respond('drivers ' + json.dumps(sorted(str(i) for i in driver_ids)))
+            return
         if request.command == 'diag':
             await respond('diag ' + json.dumps(voice_diagnostics(message.guild), sort_keys=True))
             return
@@ -252,12 +242,8 @@ def install(bot, command_group, *, driver_id: int, channel_id: int, nonce: str):
         if command is None:
             await respond(f'error UnknownCommand: {request.command}')
             return
-        args = dict(request.args)
-        as_user = args.pop(AS_USER_ARG, None)
-        kwargs = bind_arguments(command, args)
-        author = message.guild.get_member(driver_id) or message.author
-        if as_user is not None:
-            author = StandInAuthor(author, parse_user_id(as_user))
+        kwargs = bind_arguments(command, request.args)
+        author = message.guild.get_member(message.author.id) or message.author
         ctx = ControlContext(message, author, respond)
         await command.callback(ctx, **kwargs)
         if not ctx.responses:
@@ -265,7 +251,7 @@ def install(bot, command_group, *, driver_id: int, channel_id: int, nonce: str):
 
     bot.add_listener(on_ready, 'on_ready')
     bot.add_listener(on_message, 'on_message')
-    _log.warning('E2E control hook enabled (driver=%s, channel=%s)', driver_id, channel_id)
+    _log.warning('E2E control hook enabled (drivers=%s, channel=%s)', sorted(driver_ids), channel_id)
 
 
 def install_from_env(bot, command_group) -> bool:
@@ -284,5 +270,6 @@ def install_from_env(bot, command_group) -> bool:
         driver_id=int(driver_id),
         channel_id=int(os.environ['JELLYCHORD_E2E_CHANNEL_ID']),
         nonce=os.environ['JELLYCHORD_E2E_NONCE'],
+        extra_driver_ids=parse_driver_ids(os.getenv('JELLYCHORD_E2E_EXTRA_DRIVER_IDS')),
     )
     return True
