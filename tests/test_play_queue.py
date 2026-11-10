@@ -829,6 +829,57 @@ class EmptyAlbumTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(ctx.responses, ["That album has no tracks to play"])
 
 
+class FairplayPromoteDemoteTests(unittest.IsolatedAsyncioTestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.main = import_main_with_stubs()
+
+    def setUp(self):
+        self.main.queues.clear()
+        self.main.playing.clear()
+        self.main.config["fairplay"] = True
+        self.main.queues[42] = {
+            100: [queue_entry("user-100-a"), queue_entry("user-100-b"), queue_entry("user-100-c")],
+            200: [queue_entry("user-200-a")],
+        }
+
+    def user_queue_ids(self):
+        return {user_id: queue_ids(queue) for user_id, queue in self.main.queues[42].items()}
+
+    async def test_demote_middle_track_moves_it_to_the_back(self):
+        ctx = FakeContext(author_id=100)
+        # flattened queue: user-100-a, user-200-a, user-100-b, user-100-c
+        await self.main.demote(ctx, 3)
+
+        self.assertEqual(
+            self.user_queue_ids(),
+            {100: ["user-100-a", "user-100-c", "user-100-b"], 200: ["user-200-a"]},
+        )
+        self.assertEqual(ctx.responses, ["Demoted track to the back of your tracks: Artist - user-100-b"])
+
+    async def test_promote_last_track_moves_it_to_the_front(self):
+        ctx = FakeContext(author_id=100)
+        await self.main.promote(ctx, 4)
+
+        self.assertEqual(
+            self.user_queue_ids(),
+            {100: ["user-100-c", "user-100-a", "user-100-b"], 200: ["user-200-a"]},
+        )
+
+    async def test_user_without_tracks_gets_own_tracks_reply(self):
+        for command, verb in ((self.main.promote, "promote"), (self.main.demote, "demote")):
+            with self.subTest(command=verb):
+                ctx = FakeContext(author_id=300)
+
+                await command(ctx, 1)
+
+                self.assertEqual(ctx.responses, [f"You can only {verb} your own tracks in fairplay mode"])
+                self.assertEqual(
+                    self.user_queue_ids(),
+                    {100: ["user-100-a", "user-100-b", "user-100-c"], 200: ["user-200-a"]},
+                )
+
+
 class VoiceStateListenerTests(unittest.IsolatedAsyncioTestCase):
     """onVoiceStateUpdate clears a guild's state when the bot is kicked or
     disconnected from voice, but not when it leaves on its own, moves, or

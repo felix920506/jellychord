@@ -743,7 +743,7 @@ async def promote(ctx: discord.ApplicationContext,
             await ctx.respond(f'Promoted track to the front: {getTrackString(item)}')
         else:
             target = guildqueue[index-1]
-            for item in queues[ctx.guild_id][ctx.author.id]:
+            for item in queues[ctx.guild_id].get(ctx.author.id, []):
                 if item['Id'] == target['Id']:
                     queues[ctx.guild_id][ctx.author.id].remove(item)
                     queues[ctx.guild_id][ctx.author.id].insert(0, item)
@@ -768,10 +768,10 @@ async def demote(ctx: discord.ApplicationContext,
             await ctx.respond(f'Demoted track to the back: {getTrackString(item)}')
         else:
             target = guildqueue[index-1]
-            for item in queues[ctx.guild_id][ctx.author.id]:
+            for item in queues[ctx.guild_id].get(ctx.author.id, []):
                 if item['Id'] == target['Id']:
                     queues[ctx.guild_id][ctx.author.id].remove(item)
-                    queues[ctx.guild_id][ctx.author.id].insert(-1, item)
+                    queues[ctx.guild_id][ctx.author.id].append(item)
                     await ctx.respond(f'Demoted track to the back of your tracks: {getTrackString(item)}')
                     return
             else:
