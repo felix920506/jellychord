@@ -880,6 +880,141 @@ class FairplayPromoteDemoteTests(unittest.IsolatedAsyncioTestCase):
                 )
 
 
+class FairplayDuplicateTrackTests(unittest.IsolatedAsyncioTestCase):
+    """remove/promote/demote act on the entry at the index, not the first copy
+    with the same Id."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.main = import_main_with_stubs()
+
+    def setUp(self):
+        self.main.queues.clear()
+        self.main.playing.clear()
+        self.main.config["fairplay"] = True
+
+    def tearDown(self):
+        self.main.config["fairplay"] = False
+
+    def entry(self, track_id, tag):
+        entry = queue_entry(track_id)
+        entry["tag"] = tag
+        return entry
+
+    def tags(self):
+        return {uid: [e["tag"] for e in q] for uid, q in self.main.queues[42].items()}
+
+    async def test_remove_duplicate_from_one_user_removes_copy_at_index(self):
+        self.main.queues[42] = {100: [self.entry("song", "first"), self.entry("other", "x"), self.entry("song", "second")]}
+
+        await self.main.remove(FakeContext(author_id=100), 3)
+
+        self.assertEqual(self.tags(), {100: ["first", "x"]})
+
+    async def test_remove_duplicate_across_users_removes_copy_at_index(self):
+        self.main.queues[42] = {
+            100: [self.entry("song", "user-100")],
+            200: [self.entry("song", "user-200")],
+        }
+
+        # flattened: user-100 song, user-200 song
+        await self.main.remove(FakeContext(author_id=200), 2)
+
+        self.assertEqual(self.tags(), {100: ["user-100"]})
+
+    async def test_promote_duplicate_moves_copy_at_index(self):
+        self.main.queues[42] = {100: [self.entry("song", "first"), self.entry("other", "x"), self.entry("song", "second")]}
+
+        await self.main.promote(FakeContext(author_id=100), 3)
+
+        self.assertEqual(self.tags(), {100: ["second", "first", "x"]})
+
+    async def test_demote_duplicate_moves_copy_at_index(self):
+        self.main.queues[42] = {100: [self.entry("song", "first"), self.entry("song", "second"), self.entry("other", "x")]}
+
+        await self.main.demote(FakeContext(author_id=100), 2)
+
+        self.assertEqual(self.tags(), {100: ["first", "x", "second"]})
+
+    async def test_promote_other_users_duplicate_is_refused(self):
+        self.main.queues[42] = {
+            100: [self.entry("other", "x"), self.entry("song", "user-100")],
+            200: [self.entry("song", "user-200")],
+        }
+        ctx = FakeContext(author_id=100)
+
+        # flattened: x, user-200 song, user-100 song
+        await self.main.promote(ctx, 2)
+
+        self.assertEqual(ctx.responses, ["You can only promote your own tracks in fairplay mode"])
+        self.assertEqual(self.tags(), {100: ["x", "user-100"], 200: ["user-200"]})
+
+    def set_up_rotation(self, next_idx):
+        self.main.queues[42] = {
+            100: [self.entry("a1", "a1"), self.entry("a2", "a2")],
+            200: [self.entry("b1", "b1")],
+            300: [self.entry("c1", "c1"), self.entry("c2", "c2")],
+            400: [self.entry("d1", "d1"), self.entry("d2", "d2")],
+        }
+        self.main.playing[42] = {**queue_entry("now"), "nextTrackUserIdx": next_idx}
+
+    def flattened_tags(self):
+        return [e["tag"] for e in self.main.getFlattenedPlayQueue(42)]
+
+    async def test_removing_users_last_track_keeps_rotation(self):
+        # users: 100, 200 (one track, b1), 300, 400
+        cases = {
+            # removed user before the user due next
+            "before": (2, ["c1", "d1", "a1", "c2", "d2", "a2"]),
+            # removed user is the one due next: the following user is next
+            "at": (1, ["c1", "d1", "a1", "c2", "d2", "a2"]),
+            # removed user after the user due next
+            "after": (0, ["a1", "c1", "d1", "a2", "c2", "d2"]),
+        }
+        for name, (next_idx, expected) in cases.items():
+            with self.subTest(name):
+                self.set_up_rotation(next_idx)
+                tags = self.flattened_tags()
+                await self.main.remove(FakeContext(), tags.index("b1") + 1)
+
+                self.assertEqual(self.flattened_tags(), expected)
+                self.assertNotIn(200, self.main.queues[42])
+
+    async def test_removing_last_users_only_track_wraps_to_first_user(self):
+        self.main.queues[42] = {
+            100: [self.entry("a1", "a1")],
+            200: [self.entry("b1", "b1")],
+        }
+        self.main.playing[42] = {**queue_entry("now"), "nextTrackUserIdx": 1}
+
+        # flattened: b1, a1
+        await self.main.remove(FakeContext(), 1)
+
+        self.assertEqual(self.main.playing[42]["nextTrackUserIdx"], 0)
+        self.assertEqual(self.flattened_tags(), ["a1"])
+        self.assertEqual(self.main.popNextEntry(42)["tag"], "a1")
+
+    async def test_removing_users_track_while_nothing_plays(self):
+        self.main.queues[42] = {
+            100: [self.entry("a1", "a1")],
+            200: [self.entry("b1", "b1"), self.entry("b2", "b2")],
+        }
+
+        await self.main.remove(FakeContext(), 1)
+
+        self.assertEqual(self.flattened_tags(), ["b1", "b2"])
+        self.assertNotIn(42, self.main.playing)
+
+    async def test_removing_only_track_clears_guild_queue(self):
+        self.main.queues[42] = {100: [self.entry("a1", "a1")]}
+        self.main.playing[42] = {**queue_entry("now"), "nextTrackUserIdx": 0}
+
+        await self.main.remove(FakeContext(), 1)
+
+        self.assertNotIn(42, self.main.queues)
+        self.assertEqual(self.main.playing[42]["nextTrackUserIdx"], 0)
+
+
 class VoiceStateListenerTests(unittest.IsolatedAsyncioTestCase):
     """onVoiceStateUpdate clears a guild's state when the bot is kicked or
     disconnected from voice, but not when it leaves on its own, moves, or
