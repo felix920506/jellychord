@@ -2097,6 +2097,31 @@ class FakeChannel:
         return voice_client
 
 
+class HeldConnectChannel(FakeChannel):
+    """connect() registers the voice client, then holds the handshake until
+    release_connect(), so other commands can run in between, like py-cord."""
+
+    def __init__(self, guild, **kwargs):
+        super().__init__(guild, **kwargs)
+        self.connect_started = asyncio.Event()
+        self._release = asyncio.Event()
+
+    def release_connect(self):
+        self._release.set()
+
+    async def connect(self):
+        if self.guild.voice_client is not None:
+            raise RuntimeError("Already connected to a voice channel.")
+        voice_client = FakeVoiceClient(bitrate=self.bitrate)
+        voice_client.channel = self
+        voice_client.guild = self.guild
+        self.guild.voice_client = voice_client
+        self.clients.append(voice_client)
+        self.connect_started.set()
+        await self._release.wait()
+        return voice_client
+
+
 class SlowLeaveVoiceClient(FakeVoiceClient):
     """disconnect() blocks until release_disconnect(), like py-cord waiting
     (up to 60s) for Discord to confirm the leave. The voice client stays the
@@ -2663,6 +2688,28 @@ class PlayDuringLeaveTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(ctx.responses, ["Now playing track: Artist - chosen"])
         self.assertEqual(len(self.invoker_channel.clients), 1)
+        self.assertEqual(self.main.playing[42]["Id"], "chosen")
+        self.assertEqual(queue_ids(self.main.queues[42]), ["first"])
+
+    async def test_playnow_still_plays_chosen_track_when_play_lands_during_its_connect(self):
+        channel = HeldConnectChannel(self.guild)
+        self.addCleanup(channel.release_connect)
+        self.main.queues[42] = [queue_entry("first"), queue_entry("chosen")]
+        ctx = LiveContext(self.guild, author_id=100, channel=channel)
+        other_ctx = LiveContext(self.guild, author_id=200, channel=channel)
+
+        playnow = asyncio.create_task(self.main.playnow(ctx, 2))
+        await channel.connect_started.wait()
+        # the voice client exists but is still connecting: /play next only queues, in front
+        await self.run_play(other_ctx, "other", "next")
+        self.assertEqual(queue_ids(self.main.queues[42]), ["other", "chosen", "first"])
+        channel.release_connect()
+        await playnow
+        session = channel.clients[0]
+        await self.wait_for(lambda: len(session.play_calls) == 2)
+
+        self.assertEqual(ctx.responses, ["Now playing track: Artist - chosen"])
+        self.assertEqual(len(channel.clients), 1)
         self.assertEqual(self.main.playing[42]["Id"], "chosen")
         self.assertEqual(queue_ids(self.main.queues[42]), ["first"])
 

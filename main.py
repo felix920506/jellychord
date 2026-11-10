@@ -1040,6 +1040,18 @@ async def demote(ctx: discord.ApplicationContext,
                 userQueue.append(item)
                 await ctx.respond(f'Demoted track to the back of your tracks: {getTrackString(item)}')
 
+def playNextIfStillQueued(guild: discord.Guild, entry: dict):
+    """If entry is still waiting in the (non-fairplay) queue, move it to the
+    front and skip whatever is playing or loading, so it plays next. Does
+    nothing if it was already taken off the queue (playing, or removed)."""
+    queue = queues.get(guild.id, [])
+    waitingAt = next((i for i, e in enumerate(queue) if e is entry), None)
+    if waitingAt is None:
+        return
+    queue.insert(0, queue.pop(waitingAt))
+    if guild.voice_client:
+        skipCurrentTrack(guild)
+
 if not config.get('fairplay'):
     # playnow command is disabled in fairplay mode since it would defeat the whole point
     @cmdgrp.command()
@@ -1071,18 +1083,12 @@ if not config.get('fairplay'):
                 # Not in voice (kept queue after a leave): start a session,
                 # which plays from the front, where the track now is.
                 await ctx.respond(f'Now playing track: {getTrackString(item)}')
-                # Another /play or /start may have run while the reply was
-                # sent: put the track back in front if it is still waiting,
-                # and if that command already started a session, skip
-                # whatever it is playing so this track comes next.
-                queue = queues.get(ctx.guild_id, [])
-                waitingAt = next((i for i, e in enumerate(queue) if e is item), None)
-                if waitingAt is not None:
-                    queue.insert(0, queue.pop(waitingAt))
                 if not ctx.voice_client:
                     await startPlayer(ctx)
-                elif waitingAt is not None:
-                    skipCurrentTrack(ctx.guild)
+                # Another /play or /start may have run while the reply was
+                # sent or while connecting, and queued or started something
+                # ahead of this track.
+                playNextIfStillQueued(ctx.guild, item)
 
 @cmdgrp.command()
 async def clear(ctx: discord.ApplicationContext):
