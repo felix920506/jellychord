@@ -54,6 +54,8 @@ class FakeVoiceClient:
         self.paused = False
         self.pause_calls = 0
         self.resume_calls = 0
+        self.connected = True
+        self.disconnect_kwargs = None
 
     def play(self, audio, after):
         self.play_calls.append((audio, after))
@@ -77,8 +79,12 @@ class FakeVoiceClient:
         self.resume_calls += 1
         self.paused = False
 
-    def disconnect(self):
+    def is_connected(self):
+        return self.connected
+
+    def disconnect(self, **kwargs):
         self.disconnect_requested = True
+        self.disconnect_kwargs = kwargs
         return "disconnect-coroutine"
 
 
@@ -232,24 +238,27 @@ class PlayQueueTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(scheduled, [("disconnect-coroutine", voice_client.loop)])
 
 
-    def test_play_next_track_initialises_state_before_stream_setup(self):
+    def test_play_next_track_publishes_fully_initialised_entry(self):
+        self.main.config["fairplay"] = True
         voice_client = FakeVoiceClient()
         guild = types.SimpleNamespace(id=42, voice_client=voice_client)
-        self.main.queues[42] = [queue_entry("first")]
-        seen = []
-        jf = self.main.JF_APICLIENT
+        self.main.queues[42] = {100: [queue_entry("first")], 200: [queue_entry("second")]}
+        published = []
 
-        def get_audio_hls(track_id, bitrate):
-            # Commands can run while the stream is starting; the entry must be complete.
-            seen.append(dict(self.main.playing[42]))
-            return FakeJFAPI.getAudioHls(jf, track_id, bitrate)
+        class RecordingDict(dict):
+            # Commands on the event loop can read `playing` at any moment, so
+            # whatever gets stored there must already be complete.
+            def __setitem__(self, key, value):
+                published.append(dict(value))
+                super().__setitem__(key, value)
 
-        jf.getAudioHls = get_audio_hls
-        self.main.playNextTrack(guild)
+        with mock.patch.object(self.main, "playing", RecordingDict()):
+            self.main.playNextTrack(guild)
 
-        self.assertFalse(seen[0]["paused"])
-        self.assertIn("starttime", seen[0])
-        self.assertIn("playtime-offset", seen[0])
+        self.assertEqual(len(published), 1)
+        for key in ("playtime-offset", "starttime", "paused", "nextTrackUserIdx"):
+            self.assertIn(key, published[0])
+        self.assertFalse(published[0]["paused"])
 
     def test_play_next_track_skips_track_that_fails_to_start(self):
         voice_client = FakeVoiceClient()
@@ -294,6 +303,74 @@ class PlayQueueTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(42, self.main.playing)
         self.assertTrue(voice_client.disconnect_requested)
         self.assertEqual(voice_client.play_calls, [])
+
+
+    def test_play_next_track_stops_when_voice_connection_is_lost(self):
+        voice_client = FakeVoiceClient()
+        guild = types.SimpleNamespace(id=42, voice_client=voice_client)
+        self.main.queues[42] = [queue_entry("first"), queue_entry("second"), queue_entry("third")]
+
+        def play(audio, after):
+            raise RuntimeError("Not connected to voice")
+
+        voice_client.play = play
+        voice_client.connected = False
+        scheduled = []
+
+        with mock.patch.object(self.main.asyncio, "run_coroutine_threadsafe", lambda coro, loop: scheduled.append(coro)), \
+                self.assertLogs(self.main._log, "ERROR"):
+            self.main.playNextTrack(guild)
+
+        # Only the track being started is consumed; the rest is kept for /start.
+        self.assertEqual(queue_ids(self.main.queues[42]), ["second", "third"])
+        self.assertNotIn(42, self.main.playing)
+        self.assertEqual(scheduled, ["disconnect-coroutine"])
+        self.assertEqual(voice_client.disconnect_kwargs, {"force": True})
+
+    def test_play_next_track_fairplay_wraps_to_first_user_after_last_user_finishes(self):
+        self.main.config["fairplay"] = True
+        voice_client = FakeVoiceClient()
+        guild = types.SimpleNamespace(id=42, voice_client=voice_client)
+        self.main.queues[42] = {
+            100: [queue_entry("a1"), queue_entry("a2")],
+            200: [queue_entry("b1"), queue_entry("b2")],
+            300: [queue_entry("c1")],
+        }
+        self.main.playing[42] = {"nextTrackUserIdx": 2}
+
+        played = []
+        for _ in range(4):
+            self.main.playNextTrack(guild)
+            played.append(self.main.playing[42]["Id"])
+
+        self.assertEqual(played, ["c1", "a1", "b1", "a2"])
+
+    def test_play_next_track_fairplay_skips_failed_track_and_keeps_rotation(self):
+        self.main.config["fairplay"] = True
+        voice_client = FakeVoiceClient()
+        guild = types.SimpleNamespace(id=42, voice_client=voice_client)
+        self.main.queues[42] = {
+            100: [queue_entry("a")],
+            200: [queue_entry("b")],
+            300: [queue_entry("broken")],
+        }
+        self.main.playing[42] = {"nextTrackUserIdx": 2}
+        jf = self.main.JF_APICLIENT
+
+        def get_audio_hls(track_id, bitrate):
+            if track_id == "broken":
+                raise RuntimeError("boom")
+            return FakeJFAPI.getAudioHls(jf, track_id, bitrate)
+
+        jf.getAudioHls = get_audio_hls
+        with self.assertLogs(self.main._log, "ERROR"):
+            self.main.playNextTrack(guild)
+
+        self.assertEqual(self.main.playing[42]["Id"], "a")
+        self.assertEqual({uid: queue_ids(q) for uid, q in self.main.queues[42].items()}, {200: ["b"]})
+        self.main.playNextTrack(guild)
+        self.assertEqual(self.main.playing[42]["Id"], "b")
+        self.assertNotIn(42, self.main.queues)
 
 
 class PauseResumeTests(unittest.IsolatedAsyncioTestCase):
@@ -347,6 +424,24 @@ class PauseResumeTests(unittest.IsolatedAsyncioTestCase):
             ["Already playing", "Pausing playback", "Already paused", "Resuming playback"],
         )
         self.assertEqual((voice_client.pause_calls, voice_client.resume_calls), (1, 1))
+
+    async def test_pause_and_resume_survive_track_ending_during_reply(self):
+        for command, expected_paused in ((self.main.pause, True), (self.main.resume, False)):
+            voice_client = FakeVoiceClient()
+            self.start_track(voice_client)
+            if command is self.main.resume:
+                await self.main.pause(FakeContext(voice_client=voice_client))
+            ctx = FakeContext(voice_client=voice_client)
+            seen = []
+
+            async def respond(message, **kwargs):
+                # The reply is a network round trip; the track can end meanwhile.
+                seen.append(self.main.playing[42]["paused"])
+                self.main.playing.pop(42)
+
+            ctx.respond = respond
+            await command(ctx)
+            self.assertEqual(seen, [expected_paused])
 
     async def test_pause_and_resume_when_not_connected(self):
         for command in (self.main.pause, self.main.resume):

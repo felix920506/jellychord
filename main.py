@@ -153,43 +153,52 @@ def startNextTrack(guild) -> bool:
             thisTrackUserIdx = playing[guild.id].get('nextTrackUserIdx', 0) % len(queues[guild.id]) if guild.id in playing else 0
             thisTrackUser = list(queues[guild.id].keys())[thisTrackUserIdx]
         # grab the next item off the queue to play
-        playing[guild.id] = queues[guild.id].pop(0) if not fairplay else queues[guild.id][thisTrackUser].pop(0)
+        track = queues[guild.id].pop(0) if not fairplay else queues[guild.id][thisTrackUser].pop(0)
 
-        # Fully initialise the playback state before the (slow) stream setup below,
-        # so commands issued in the meantime never see a half-built entry.
-        playing[guild.id]['playtime-offset'] = datetime.timedelta()
-        playing[guild.id]['starttime'] = datetime.datetime.now()
-        playing[guild.id]['paused'] = False
+        # Fully build the playback state before publishing it in `playing`, so
+        # commands running on the event loop never see a half-built entry.
+        track['playtime-offset'] = datetime.timedelta()
+        track['starttime'] = datetime.datetime.now()
+        track['paused'] = False
         if fairplay:
             # find the next user to play from
             userIds = list(queues[guild.id].keys())
-            thisIdx = userIds.index(thisTrackUser) if thisTrackUser in userIds else -1
-            nextIdx = (thisIdx + 1) % len(userIds)
+            thisIdx = userIds.index(thisTrackUser)
 
-            # clean up any empty queues for users
-            if not queues[guild.id][thisTrackUser]:
+            if queues[guild.id][thisTrackUser]:
+                nextIdx = (thisIdx + 1) % len(userIds)
+            else:
+                # clean up any empty queues for users; everyone after this user
+                # shifts down one place, so the next user is now at thisIdx
                 queues[guild.id].pop(thisTrackUser)
-                nextIdx -= 1
+                nextIdx = thisIdx % len(queues[guild.id]) if queues[guild.id] else 0
 
-            playing[guild.id]['nextTrackUserIdx'] = nextIdx
+            track['nextTrackUserIdx'] = nextIdx
+            track['nextTrackUser'] = None
 
-        if not queues[guild.id]: 
+        if not queues[guild.id]:
             queues.pop(guild.id)
 
-        if fairplay:
-            playing[guild.id]['nextTrackUser'] = None
+        playing[guild.id] = track
 
         audio = None
         try:
-            url = JF_APICLIENT.getAudioHls(playing[guild.id]["Id"],br)
+            url = JF_APICLIENT.getAudioHls(track["Id"],br)
             audio = discord.FFmpegOpusAudio(url, codec='copy')
             audio.read()
-            playing[guild.id]['starttime'] = datetime.datetime.now()
+            track['starttime'] = datetime.datetime.now()
             vc.play(audio, after=lambda e: playNextTrack(guild, e))
         except Exception:
-            _log.exception('Failed to start track %s, skipping', playing[guild.id].get('Id'))
             if audio is not None:
                 audio.cleanup()
+            if not vc.is_connected():
+                # Not the track's fault: stop here rather than burn through the
+                # rest of the queue, and drop the dead connection so /start works.
+                _log.exception('Lost voice connection while starting track %s', track.get('Id'))
+                playing.pop(guild.id, None)
+                asyncio.run_coroutine_threadsafe(vc.disconnect(force=True), vc.loop)
+                return True
+            _log.exception('Failed to start track %s, skipping', track.get('Id'))
             return False
     else:
         playing.pop(guild.id, None)
@@ -457,11 +466,12 @@ async def pause(ctx: discord.ApplicationContext):
         elif playing[ctx.guild_id]['paused']:
             await ctx.respond('Already paused')
         else:
-            await ctx.respond('Pausing playback')
+            # update state before awaiting, so the track can't change underneath us
             td = datetime.datetime.now() - playing[ctx.guild_id]['starttime']
             playing[ctx.guild_id]['paused'] = True
             playing[ctx.guild_id]['playtime-offset'] += td
             ctx.voice_client.pause()
+            await ctx.respond('Pausing playback')
     else:
         await ctx.respond('Not connect to any voice channel')
 
@@ -472,10 +482,11 @@ async def resume(ctx: discord.ApplicationContext):
         if not hasActiveTrack(ctx):
             await ctx.respond('Not currently playing')
         elif playing[ctx.guild_id]['paused']:
-            await ctx.respond('Resuming playback')
+            # update state before awaiting, so the track can't change underneath us
             playing[ctx.guild_id]['starttime'] = datetime.datetime.now()
             playing[ctx.guild_id]['paused'] = False
             ctx.voice_client.resume()
+            await ctx.respond('Resuming playback')
         else:
             await ctx.respond('Already playing')
     else:
