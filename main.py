@@ -685,18 +685,24 @@ class searchDropdown(discord.ui.Select):
         await interaction.response.edit_message(content=f'Playing {getTrackString(self.items[int(self._selected_values[0])], showType=True)}',view=None)
         await playHelperGeneric(self.items[int(self._selected_values[0])], self.ctx, self.when)
 
-class searchView(discord.ui.View):
+class ownerOnlyView(discord.ui.View):
+    # For views on public replies: only the user who ran the command may use
+    # them. Others get checkFailureMessage as an ephemeral reply.
+    checkFailureMessage = 'Only the user who ran this command can use this.'
+
     def __init__(self, ownerId: int):
-        super(searchView, self).__init__()
+        super(ownerOnlyView, self).__init__()
         self.ownerId = ownerId
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        # The reply is public, so only the user who ran /search may pick:
-        # the track is queued (and the bot joins voice) on their behalf.
         return interaction.user.id == self.ownerId
 
     async def on_check_failure(self, interaction: discord.Interaction):
-        await interaction.response.send_message('Only the user who ran this search can pick an item.', ephemeral=True)
+        await interaction.response.send_message(self.checkFailureMessage, ephemeral=True)
+
+class searchView(ownerOnlyView):
+    # The track is queued (and the bot joins voice) on the invoker's behalf.
+    checkFailureMessage = 'Only the user who ran this search can pick an item.'
 
     async def on_timeout(self):
         self.disable_all_items()
@@ -757,9 +763,12 @@ class listRefreshButton(discord.ui.Button):
         await self.view.showPage(interaction, self.view.page)
 
 
-class listView(discord.ui.View):
-    def __init__(self, pages: int):
-        super(listView, self).__init__()
+class listView(ownerOnlyView):
+    # Paging edits the shared message, so only the invoker may page.
+    checkFailureMessage = 'Only the user who ran /queue can change its page. Run /queue to get your own view.'
+
+    def __init__(self, ownerId: int, pages: int):
+        super(listView, self).__init__(ownerId)
         self.page = 0
         self.selection = listDropdown()
         self.prevButton = listPrevButton()
@@ -777,12 +786,15 @@ class listView(discord.ui.View):
 
     async def showPage(self, interaction: discord.Interaction, page: int):
         tracks = getFlattenedPlayQueue(interaction.guild_id)
-        self.page = page
-        self.updateItems(getPageCount(len(tracks)))
-        await interaction.response.edit_message(content=getQueuePageText(tracks, page), view=self)
+        pages = getPageCount(len(tracks))
+        # The queue may have shrunk since the view was last rendered.
+        self.page = max(0, min(page, pages - 1))
+        self.updateItems(pages)
+        await interaction.response.edit_message(content=getQueuePageText(tracks, self.page), view=self)
 
     async def on_timeout(self):
         self.disable_all_items()
+        await self.message.edit(view=self)
 
 '''
 Bot Commands
@@ -856,7 +868,7 @@ async def nowplaying(ctx: discord.ApplicationContext):
 async def queue(ctx: discord.ApplicationContext):
     if ctx.guild_id in queues:
         tracks = getFlattenedPlayQueue(ctx.guild_id)
-        await ctx.respond(getQueuePageText(tracks, 0), view=listView(getPageCount(len(tracks))))
+        await ctx.respond(getQueuePageText(tracks, 0), view=listView(ctx.author.id, getPageCount(len(tracks))))
     else:
         await ctx.respond('Empty Queue')
 

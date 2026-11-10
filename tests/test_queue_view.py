@@ -6,15 +6,34 @@ from tests.test_main_helpers import import_main_with_stubs
 from tests.test_play_queue import queue_entry
 
 
-def make_ctx(guild_id=1):
-    return types.SimpleNamespace(guild_id=guild_id, respond=mock.AsyncMock())
+OWNER_ID = 100
 
 
-def make_interaction(guild_id=1):
+def make_ctx(guild_id=1, user_id=OWNER_ID):
     return types.SimpleNamespace(
         guild_id=guild_id,
-        response=types.SimpleNamespace(edit_message=mock.AsyncMock()),
+        author=types.SimpleNamespace(id=user_id),
+        respond=mock.AsyncMock(),
     )
+
+
+def make_interaction(guild_id=1, user_id=OWNER_ID):
+    return types.SimpleNamespace(
+        guild_id=guild_id,
+        user=types.SimpleNamespace(id=user_id),
+        response=types.SimpleNamespace(
+            edit_message=mock.AsyncMock(),
+            send_message=mock.AsyncMock(),
+        ),
+    )
+
+
+async def dispatch(view, item, interaction):
+    # Mirrors py-cord's View._scheduled_task: the item callback only runs if
+    # interaction_check passes, otherwise on_check_failure is called.
+    if not await view.interaction_check(interaction):
+        return await view.on_check_failure(interaction)
+    await item.callback(interaction)
 
 
 class QueueViewTests(unittest.IsolatedAsyncioTestCase):
@@ -170,6 +189,103 @@ class QueueViewTests(unittest.IsolatedAsyncioTestCase):
         # Near the end the window stays 25 pages wide and ends at the last page.
         self.assertEqual(self.option_labels(view), [str(i) for i in range(16, 41)])
         self.assertEqual(self.selected_labels(view), ["37"])
+
+    async def open_queue(self, count):
+        self.set_queue(count)
+        ctx = make_ctx()
+        await self.main.queue(ctx)
+        return ctx.respond.await_args.kwargs["view"]
+
+    def last_footer(self, interaction):
+        return interaction.response.edit_message.await_args.kwargs["content"].split("\n")[-1]
+
+    async def test_next_after_queue_shrinks_clamps_to_last_page(self):
+        size = self.main.PLAYLIST_PAGESIZE
+        view = await self.open_queue(6 * size)
+        view.selection._selected_values = ["6"]
+        await view.selection.callback(make_interaction())
+        self.assertEqual(view.page, 5)
+        del self.main.queues[1][2 * size:]
+
+        interaction = make_interaction()
+        await view.nextButton.callback(interaction)
+
+        self.assertEqual(view.page, 1)
+        self.assertEqual(self.last_footer(interaction), "Page: 2/2")
+        content = interaction.response.edit_message.await_args.kwargs["content"]
+        self.assertTrue(content.split("\n")[1].startswith(f"{size + 1}. "))
+        self.assertTrue(view.nextButton.disabled)
+        self.assertFalse(view.prevButton.disabled)
+        self.assertEqual(self.selected_labels(view), ["2"])
+
+    async def test_prev_after_queue_shrinks_clamps_to_last_page(self):
+        size = self.main.PLAYLIST_PAGESIZE
+        view = await self.open_queue(6 * size)
+        view.selection._selected_values = ["6"]
+        await view.selection.callback(make_interaction())
+        del self.main.queues[1][2 * size:]
+
+        interaction = make_interaction()
+        await view.prevButton.callback(interaction)
+
+        # Page 5 no longer exists; the last remaining page is shown.
+        self.assertEqual(view.page, 1)
+        self.assertEqual(self.last_footer(interaction), "Page: 2/2")
+        self.assertTrue(view.nextButton.disabled)
+
+    async def test_refresh_on_late_page_after_queue_empties_shows_page_one(self):
+        size = self.main.PLAYLIST_PAGESIZE
+        view = await self.open_queue(3 * size)
+        await view.nextButton.callback(make_interaction())
+        await view.nextButton.callback(make_interaction())
+        self.main.queues[1].clear()
+
+        interaction = make_interaction()
+        await view.items[1].callback(interaction)
+
+        self.assertEqual(view.page, 0)
+        self.assertEqual(self.last_footer(interaction), "Page: 1/1")
+        self.assertTrue(view.prevButton.disabled)
+        self.assertTrue(view.nextButton.disabled)
+        self.assertEqual(self.selected_labels(view), ["1"])
+
+    async def test_prev_on_first_page_of_empty_queue_stays_on_page_one(self):
+        view = await self.open_queue(5)
+        self.main.queues[1].clear()
+
+        interaction = make_interaction()
+        await view.prevButton.callback(interaction)
+
+        self.assertEqual(view.page, 0)
+        self.assertEqual(self.last_footer(interaction), "Page: 1/1")
+
+    async def test_other_user_cannot_page_and_invoker_still_can(self):
+        view = await self.open_queue(3 * self.main.PLAYLIST_PAGESIZE)
+
+        other = make_interaction(user_id=200)
+        await dispatch(view, view.nextButton, other)
+
+        other.response.send_message.assert_awaited_once()
+        self.assertTrue(other.response.send_message.await_args.kwargs.get("ephemeral"))
+        other.response.edit_message.assert_not_awaited()
+        self.assertEqual(view.page, 0)
+
+        owner = make_interaction()
+        await dispatch(view, view.nextButton, owner)
+
+        self.assertEqual(view.page, 1)
+        self.assertEqual(self.last_footer(owner), "Page: 2/3")
+        owner.response.send_message.assert_not_awaited()
+
+    async def test_timeout_shows_disabled_items(self):
+        view = await self.open_queue(3 * self.main.PLAYLIST_PAGESIZE)
+        view.message = types.SimpleNamespace(edit=mock.AsyncMock())
+
+        # py-cord calls view.on_timeout() with no arguments.
+        await view.on_timeout()
+
+        view.message.edit.assert_awaited_once_with(view=view)
+        self.assertTrue(all(item.disabled for item in view.items))
 
     def test_page_selector_range_window(self):
         r = self.main.getPageSelectorRange
