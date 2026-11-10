@@ -1015,6 +1015,109 @@ class FairplayDuplicateTrackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.main.playing[42]["nextTrackUserIdx"], 0)
 
 
+class FairplayShuffleTests(unittest.IsolatedAsyncioTestCase):
+    """/shuffle keeps the user due next as next and shuffles the others after them.
+    random.shuffle is patched to reverse, so the order is deterministic."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.main = import_main_with_stubs()
+
+    def setUp(self):
+        self.main.queues.clear()
+        self.main.playing.clear()
+        self.main.config["fairplay"] = True
+        patcher = mock.patch.object(self.main.random, "shuffle", side_effect=lambda items: items.reverse())
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def tearDown(self):
+        self.main.config["fairplay"] = False
+
+    def set_up_users(self, *user_ids):
+        self.main.queues[42] = {
+            uid: [queue_entry(f"{uid}-1"), queue_entry(f"{uid}-2")] for uid in user_ids
+        }
+
+    def flattened_ids(self):
+        return queue_ids(self.main.getFlattenedPlayQueue(42))
+
+    def play_all_ids(self):
+        ids = []
+        while (entry := self.main.popNextEntry(42)) is not None:
+            ids.append(entry["Id"])
+        return ids
+
+    async def shuffle(self):
+        ctx = FakeContext()
+        await self.main.shuffle(ctx)
+        self.assertEqual(ctx.responses, ["Shuffling playlist"])
+
+    async def test_user_due_next_stays_next(self):
+        self.set_up_users(100, 200, 300, 400)
+        self.main.playing[42] = {**queue_entry("now"), "nextTrackUserIdx": 2}
+
+        await self.shuffle()
+
+        # 300 was due; the others (400, 100, 200 in rotation order) are shuffled
+        self.assertEqual(list(self.main.queues[42]), [300, 200, 100, 400])
+        self.assertEqual(self.main.playing[42]["nextTrackUserIdx"], 0)
+        expected = ["300-2", "200-2", "100-2", "400-2", "300-1", "200-1", "100-1", "400-1"]
+        self.assertEqual(self.flattened_ids(), expected)
+        self.assertEqual(self.play_all_ids(), expected)
+
+    async def test_user_who_just_played_does_not_play_again(self):
+        # 100 just played, 200 is due next
+        self.set_up_users(100, 200)
+        self.main.playing[42] = {**queue_entry("now"), "nextTrackUserIdx": 1}
+
+        await self.shuffle()
+
+        self.assertEqual(self.main.popNextEntry(42)["Id"], "200-2")
+
+    async def test_rotation_index_past_user_count_wraps(self):
+        self.set_up_users(100, 200, 300)
+        self.main.playing[42] = {**queue_entry("now"), "nextTrackUserIdx": 5}
+
+        await self.shuffle()
+
+        # 5 % 3 == 2: 300 was due
+        self.assertEqual(list(self.main.queues[42]), [300, 200, 100])
+        self.assertEqual(self.main.playing[42]["nextTrackUserIdx"], 0)
+        self.assertEqual(self.flattened_ids()[0], "300-2")
+        self.assertEqual(self.main.popNextEntry(42)["Id"], "300-2")
+
+    async def test_shuffle_while_nothing_plays(self):
+        self.set_up_users(100, 200, 300)
+
+        await self.shuffle()
+
+        # with nothing playing the first user is due
+        self.assertEqual(list(self.main.queues[42]), [100, 300, 200])
+        self.assertNotIn(42, self.main.playing)
+        expected = ["100-2", "300-2", "200-2", "100-1", "300-1", "200-1"]
+        self.assertEqual(self.flattened_ids(), expected)
+        self.assertEqual(self.play_all_ids(), expected)
+
+    async def test_single_user_shuffles_tracks(self):
+        self.set_up_users(100)
+        self.main.playing[42] = {**queue_entry("now"), "nextTrackUserIdx": 3}
+
+        await self.shuffle()
+
+        self.assertEqual(list(self.main.queues[42]), [100])
+        self.assertEqual(self.main.playing[42]["nextTrackUserIdx"], 0)
+        self.assertEqual(self.play_all_ids(), ["100-2", "100-1"])
+
+    def test_popped_entry_has_no_next_track_user(self):
+        self.set_up_users(100, 200)
+
+        entry = self.main.popNextEntry(42)
+
+        self.assertNotIn("nextTrackUser", entry)
+        self.assertEqual(entry["nextTrackUserIdx"], 1)
+
+
 class VoiceStateListenerTests(unittest.IsolatedAsyncioTestCase):
     """onVoiceStateUpdate clears a guild's state when the bot is kicked or
     disconnected from voice, but not when it leaves on its own, moves, or

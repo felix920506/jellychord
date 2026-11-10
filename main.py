@@ -226,7 +226,6 @@ def popNextEntry(guildId: int) -> dict | None:
             nextIdx = (thisIdx + 1) % len(userIds)
 
         entry['nextTrackUserIdx'] = nextIdx
-        entry['nextTrackUser'] = None
 
     if not queues[guildId]:
         queues.pop(guildId)
@@ -469,6 +468,18 @@ def removeFairplayUser(guildId: int, userId: int):
         playing[guildId]['nextTrackUserIdx'] = nextIdx % remaining if remaining else 0
     if not remaining:
         queues.pop(guildId)
+
+def shuffleFairplayUsers(guildId: int):
+    """Shuffle the user rotation. The user due next stays next, so the user
+    who just played can't play again right away; the others are shuffled after them."""
+    userIds = list(queues[guildId].keys())
+    # nothing may be playing; popNextEntry then starts from the first user
+    nextIdx = playing.get(guildId, {}).get('nextTrackUserIdx', 0) % len(userIds)
+    others = userIds[nextIdx+1:]+userIds[:nextIdx]
+    random.shuffle(others)
+    queues[guildId] = {uid: queues[guildId][uid] for uid in [userIds[nextIdx]]+others}
+    if guildId in playing:
+        playing[guildId]['nextTrackUserIdx'] = 0
 
 '''
 Discord View Related
@@ -728,10 +739,7 @@ async def shuffle(ctx: discord.ApplicationContext):
             for userId in queues[ctx.guild_id]:
                 random.shuffle(queues[ctx.guild_id][userId])
 
-            userIds = list(queues[ctx.guild_id].keys())
-            random.shuffle(userIds)
-            shuffledQueues = {uid: queues[ctx.guild_id][uid] for uid in userIds}
-            queues[ctx.guild_id] = shuffledQueues
+            shuffleFairplayUsers(ctx.guild_id)
         else:
             random.shuffle(queues[ctx.guild_id])
         await ctx.respond('Shuffling playlist')
