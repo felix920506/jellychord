@@ -1040,21 +1040,55 @@ async def demote(ctx: discord.ApplicationContext,
                 userQueue.append(item)
                 await ctx.respond(f'Demoted track to the back of your tracks: {getTrackString(item)}')
 
+def playNextIfStillQueued(guild: discord.Guild, entry: dict):
+    """If entry is still waiting in the (non-fairplay) queue, move it to the
+    front and skip whatever is playing or loading, so it plays next. Does
+    nothing if it was already taken off the queue (playing, or removed)."""
+    queue = queues.get(guild.id, [])
+    waitingAt = next((i for i, e in enumerate(queue) if e is entry), None)
+    if waitingAt is None:
+        return
+    queue.insert(0, queue.pop(waitingAt))
+    if guild.voice_client:
+        skipCurrentTrack(guild)
+
 if not config.get('fairplay'):
     # playnow command is disabled in fairplay mode since it would defeat the whole point
     @cmdgrp.command()
     async def playnow(ctx: discord.ApplicationContext,
                     index: discord.Option(int, min_value=1)):
         global queues
+        if ctx.guild_id in leaving:
+            # Like /start: the voice client it still has is about to go away
+            # (see stopPlayback), and the leave can take a while, so defer.
+            await ctx.defer()
+            await waitUntilLeft(ctx.guild_id)
         if ctx.guild_id not in queues:
             await ctx.respond('Playlist is empty')
         elif len(queues[ctx.guild_id]) < index:
             await ctx.respond('Specified index does not exist')
+        elif not ctx.voice_client and not ctx.author.voice:
+            # Nothing would play it, so leave the queue as it is, like /start
+            # and /play refuse without changing anything.
+            await ctx.respond('You are not in any voice channel')
         else:
             item = queues[ctx.guild_id].pop(index-1)
             queues[ctx.guild_id].insert(0, item)
-            skipCurrentTrack(ctx.guild)
-            await ctx.respond(f'Now playing track: {getTrackString(item)}')
+            if ctx.voice_client:
+                # Also while the connection is down (#64): advanceTrack is
+                # waiting for it to recover and then plays from the front.
+                skipCurrentTrack(ctx.guild)
+                await ctx.respond(f'Now playing track: {getTrackString(item)}')
+            else:
+                # Not in voice (kept queue after a leave): start a session,
+                # which plays from the front, where the track now is.
+                await ctx.respond(f'Now playing track: {getTrackString(item)}')
+                if not ctx.voice_client:
+                    await startPlayer(ctx)
+                # Another /play or /start may have run while the reply was
+                # sent or while connecting, and queued or started something
+                # ahead of this track.
+                playNextIfStillQueued(ctx.guild, item)
 
 @cmdgrp.command()
 async def clear(ctx: discord.ApplicationContext):
