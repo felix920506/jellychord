@@ -827,6 +827,21 @@ Bot Commands
 Handlers change queues/playing before awaiting ctx.respond(): a track can end,
 and advanceTrack() run, while the reply is being sent to Discord.
 '''
+# when=now skips the playing track, which in fairplay mode may be another
+# user's, and the rotation, not the requester, still decides what plays next.
+# Like /playnow it isn't offered there (#83).
+WHEN_CHOICES = ['next', 'last'] if config.get('fairplay') else ['now', 'next', 'last']
+WHEN_NOW_FAIRPLAY_MESSAGE = ("`when: now` isn't available in fairplay mode, since it would skip other users' tracks. "
+                             "Use `when: next` to put the track at the front of your own queue.")
+
+async def refuseWhenNowInFairplay(ctx: discord.ApplicationContext, when: str) -> bool:
+    """Refuse when=now in fairplay mode. The option isn't offered there, but a
+    client with stale command data or the E2E hook can still send it."""
+    if when == 'now' and config.get('fairplay'):
+        await ctx.respond(WHEN_NOW_FAIRPLAY_MESSAGE, ephemeral=True)
+        return True
+    return False
+
 if DEBUG:
     cmdgrp = bot.create_group(config['command-group'], guild_ids=[DEBUG_SERVER])
 else:
@@ -836,8 +851,9 @@ else:
 async def search(ctx: discord.ApplicationContext, 
                  term: discord.Option(str),
                  searchtype: discord.Option(str, name="type", choices=['Soundtrack', 'Album'], required=False),
-                 when: discord.Option(str, choices=['now', 'next', 'last'], required=False) = 'last'):
-    
+                 when: discord.Option(str, choices=WHEN_CHOICES, required=False) = 'last'):
+    if await refuseWhenNowInFairplay(ctx, when):
+        return
     await ctx.defer(invisible=True)
     try:
         res = await searchHelper(term, searchType=searchtype)
@@ -858,8 +874,9 @@ async def search(ctx: discord.ApplicationContext,
 async def play(ctx: discord.ApplicationContext,
                term: discord.Option(str),
                searchtype: discord.Option(str, name='type', choices=['Soundtrack', 'Album'], required=False),
-               when: discord.Option(str, choices=['now', 'next', 'last'], required=False) = 'last'):
-    
+               when: discord.Option(str, choices=WHEN_CHOICES, required=False) = 'last'):
+    if await refuseWhenNowInFairplay(ctx, when):
+        return
     await ctx.defer(invisible=True)
     try:
         res = await searchHelper(term, limit=1, searchType=searchtype)
@@ -1116,8 +1133,9 @@ if DEBUG:
     @dbgcmd.command()
     async def playbyid(ctx: discord.ApplicationContext,
                     id: discord.Option(str),
-                    when: discord.Option(str, choices=['now', 'next', 'last'], required=False) = 'last'):
-        
+                    when: discord.Option(str, choices=WHEN_CHOICES, required=False) = 'last'):
+        if await refuseWhenNowInFairplay(ctx, when):
+            return
         await ctx.defer(invisible=True)
         try:
             res = await JF_APICLIENT.getItemsByIds([id])

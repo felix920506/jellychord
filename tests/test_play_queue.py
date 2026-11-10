@@ -2387,12 +2387,11 @@ class PlayDuringLeaveTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.main.playing[42]["Id"], "a1")
         self.assertEqual(queue_ids(self.main.queues[42]), ["a2", "first-pick"])
 
-    async def play_now_after_slow_respond(self, other_id, fairplay=False):
+    async def play_now_after_slow_respond(self, other_id):
         """/play urgent when=now waits for the leave, then its reply is slow;
         meanwhile a pick starts a new session playing other_id."""
         old_client = await self.leaving_after_last_track()
         self.assertNotIn(42, self.main.queues)
-        self.main.config["fairplay"] = fairplay
         ctx = SlowRespondContext(self.guild, author_id=100, channel=self.invoker_channel)
         other_ctx = LiveContext(self.guild, author_id=101, channel=self.invoker_channel)
 
@@ -2427,13 +2426,6 @@ class PlayDuringLeaveTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(new_client.is_playing())
         self.assertEqual(self.main.playing[42]["Id"], "urgent")
         self.assertIsNot(self.main.playing[42], other)
-        self.assertNotIn(42, self.main.queues)
-
-    async def test_play_now_with_slow_reply_skips_track_started_meanwhile_fairplay(self):
-        new_client, other = await self.play_now_after_slow_respond("other", fairplay=True)
-
-        self.assertTrue(new_client.is_playing())
-        self.assertEqual(self.main.playing[42]["Id"], "urgent")
         self.assertNotIn(42, self.main.queues)
 
     async def test_two_plays_waiting_on_one_leave_join_once(self):
