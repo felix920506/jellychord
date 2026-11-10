@@ -60,10 +60,14 @@ def make_discord_stub():
             self.url = url
             self.kwargs = kwargs
             self.read_called = False
+            self.cleaned_up = False
 
         def read(self):
             self.read_called = True
             return b""
+
+        def cleanup(self):
+            self.cleaned_up = True
 
     def option(*args, **kwargs):
         return args[0] if args else object

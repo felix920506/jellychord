@@ -4,10 +4,13 @@ import asyncio
 import yaml
 import random
 import datetime
+import logging
 import os
 from itertools import zip_longest
 
 from jfapi import JFAPI
+
+_log = logging.getLogger(__name__)
 
 config = {}
 
@@ -132,6 +135,13 @@ async def playTrack(guild: discord.Guild):
         await asyncio.to_thread(playNextTrack, guild)
 
 def playNextTrack(guild, error=None):
+    # Keep going until a track actually starts or the queue runs dry, so a track
+    # that fails to start doesn't leave the bot connected with nothing playing.
+    while not startNextTrack(guild):
+        pass
+
+def startNextTrack(guild) -> bool:
+    '''Start the next queued track. Returns False if it failed and should be skipped.'''
     vc = guild.voice_client
     br = vc.channel.bitrate
     fairplay = config.get('fairplay')
@@ -145,7 +155,11 @@ def playNextTrack(guild, error=None):
         # grab the next item off the queue to play
         playing[guild.id] = queues[guild.id].pop(0) if not fairplay else queues[guild.id][thisTrackUser].pop(0)
 
+        # Fully initialise the playback state before the (slow) stream setup below,
+        # so commands issued in the meantime never see a half-built entry.
         playing[guild.id]['playtime-offset'] = datetime.timedelta()
+        playing[guild.id]['starttime'] = datetime.datetime.now()
+        playing[guild.id]['paused'] = False
         if fairplay:
             # find the next user to play from
             userIds = list(queues[guild.id].keys())
@@ -165,15 +179,30 @@ def playNextTrack(guild, error=None):
         if fairplay:
             playing[guild.id]['nextTrackUser'] = None
 
-        url = JF_APICLIENT.getAudioHls(playing[guild.id]["Id"],br)
-        audio = discord.FFmpegOpusAudio(url, codec='copy')
-        audio.read()
-        playing[guild.id]['starttime'] = datetime.datetime.now()
-        playing[guild.id]['paused'] = False
-        vc.play(audio, after=lambda e: playNextTrack(guild, e))
+        audio = None
+        try:
+            url = JF_APICLIENT.getAudioHls(playing[guild.id]["Id"],br)
+            audio = discord.FFmpegOpusAudio(url, codec='copy')
+            audio.read()
+            playing[guild.id]['starttime'] = datetime.datetime.now()
+            vc.play(audio, after=lambda e: playNextTrack(guild, e))
+        except Exception:
+            _log.exception('Failed to start track %s, skipping', playing[guild.id].get('Id'))
+            if audio is not None:
+                audio.cleanup()
+            return False
     else:
         playing.pop(guild.id, None)
         asyncio.run_coroutine_threadsafe(vc.disconnect(), vc.loop)
+    return True
+
+def hasActiveTrack(ctx: discord.ApplicationContext) -> bool:
+    '''True if a track is loaded and the voice client is playing or paused it.
+
+    False while connecting, between tracks, or while the next stream is starting up.
+    '''
+    vc = ctx.voice_client
+    return ctx.guild_id in playing and vc is not None and (vc.is_playing() or vc.is_paused())
 
 def getTrackString(item: dict, artistLimit: int = 1, showType: bool = False, showSize: bool = False):
 
@@ -423,7 +452,9 @@ async def start(ctx: discord.ApplicationContext):
 async def pause(ctx: discord.ApplicationContext):
     global playing
     if ctx.voice_client:
-        if playing[ctx.guild_id]['paused']:
+        if not hasActiveTrack(ctx):
+            await ctx.respond('Not currently playing')
+        elif playing[ctx.guild_id]['paused']:
             await ctx.respond('Already paused')
         else:
             await ctx.respond('Pausing playback')
@@ -438,7 +469,9 @@ async def pause(ctx: discord.ApplicationContext):
 async def resume(ctx: discord.ApplicationContext):
     global playing
     if ctx.voice_client:
-        if playing[ctx.guild_id]['paused']:
+        if not hasActiveTrack(ctx):
+            await ctx.respond('Not currently playing')
+        elif playing[ctx.guild_id]['paused']:
             await ctx.respond('Resuming playback')
             playing[ctx.guild_id]['starttime'] = datetime.datetime.now()
             playing[ctx.guild_id]['paused'] = False
