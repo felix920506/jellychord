@@ -171,13 +171,33 @@ class QueueCommandTests(CommandTestCase):
 
 
 class PlaybackCommandTests(CommandTestCase):
-    def play(self, voice_client, length=185, started_ago=30):
-        """Make a track the now-playing one, started_ago seconds in."""
+    def setUp(self):
+        super().setUp()
+        # main reads the time through datetime.datetime.now(): give it a
+        # clock that only moves when advance() is called.
+        self.now = datetime.datetime(2026, 1, 1, 12, 0, 0)
+        test = self
+
+        class FrozenDatetime(datetime.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return test.now
+
+        patch = mock.patch.object(self.main, "datetime",
+                                  types.SimpleNamespace(datetime=FrozenDatetime, timedelta=datetime.timedelta))
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def advance(self, seconds):
+        self.now += datetime.timedelta(seconds=seconds)
+
+    def play(self, voice_client, length=185):
+        """Make a track the now-playing one, starting now."""
         voice_client._playing = True
         self.main.playing[42] = {
             **queue_entry("song", length=length),
             "playtime-offset": datetime.timedelta(),
-            "starttime": datetime.datetime.now() - datetime.timedelta(seconds=started_ago),
+            "starttime": self.now,
             "paused": False,
         }
         return self.main.playing[42]
@@ -185,8 +205,9 @@ class PlaybackCommandTests(CommandTestCase):
     async def test_pause_freezes_and_resume_continues_the_elapsed_time(self):
         voice_client = FakeVoiceClient()
         ctx = FakeContext(voice_client=voice_client)
-        track = self.play(voice_client)
+        self.play(voice_client)
 
+        self.advance(30)
         await self.main.nowplaying(ctx)
         await self.main.pause(ctx)
         await self.main.pause(ctx)
@@ -194,13 +215,13 @@ class PlaybackCommandTests(CommandTestCase):
         self.assertTrue(voice_client.is_paused())
 
         # time passing while paused doesn't count
-        track["starttime"] -= datetime.timedelta(seconds=60)
+        self.advance(60)
         await self.main.nowplaying(ctx)
 
         await self.main.resume(ctx)
         await self.main.resume(ctx)
         self.assertTrue(voice_client.is_playing())
-        track["starttime"] -= datetime.timedelta(seconds=10)
+        self.advance(10)
         await self.main.nowplaying(ctx)
 
         self.assertEqual(ctx.responses, [

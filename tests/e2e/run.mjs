@@ -16,6 +16,7 @@ import { Jellyfin } from './lib/jellyfin.mjs';
 import { poll, sleep } from './lib/proc.mjs';
 import { Redactor } from './lib/redact.mjs';
 import { Report, StepFailure, renderMarkdown } from './lib/report.mjs';
+import { STAND_IN_ARG, STAND_IN_USER_ID, standInProbeOutcome } from './lib/stand-in.mjs';
 import { Sut } from './lib/sut.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -228,13 +229,8 @@ async function scenarioPauseResumeStop() {
 
 // Fairplay is read once at startup, so this scenario restarts the bot with
 // JELLYCHORD_ENABLE_FAIRPLAY=1 and restarts it with fairplay off again at the
-// end; every other scenario runs with fairplay off. The test has a single
-// Discord account (the listener), so the second user is a stand-in user ID
-// passed as e2e.as (see jellychord/e2e_control.py): the bot sees a different
-// requester, who shares the listener's voice state. It is a made-up ID, not a
-// real account.
-const STAND_IN_USER_ID = '1';
-
+// end; every other scenario runs with fairplay off. The second user is a
+// stand-in user ID (see lib/stand-in.mjs).
 async function restartSut(name, envOverrides) {
   await resetPlayer();
   const readyBefore = driver.readyCount;
@@ -247,12 +243,28 @@ async function restartSut(name, envOverrides) {
 async function scenarioFairplay() {
   const delta = tone('Delta');
   const [a, b, c] = TONES.filter((t) => t.album === TONE_ALBUM);
-  await restartSut('bot restarts with fairplay on', { JELLYCHORD_ENABLE_FAIRPLAY: '1' });
-  // An image built before e2e.as existed rejects it: a harness problem.
-  await report.step('harness', 'bot under test accepts commands from a stand-in second user', async () =>
-    expectReply(await driver.command('queue', { 'e2e.as': STAND_IN_USER_ID }), 'Empty Queue'),
-  );
+  const asOther = { [STAND_IN_ARG]: STAND_IN_USER_ID };
 
+  // A published image older than e2e.as can't run this scenario: skip it
+  // there rather than report the gap as a failure on every run.
+  await resetPlayer();
+  const probeName = 'bot under test accepts commands from a stand-in second user';
+  let probeError = null;
+  try {
+    expectReply(await driver.command('queue', asOther), 'Empty Queue');
+  } catch (err) {
+    probeError = err;
+  }
+  const probe = standInProbeOutcome(probeError, cfg.sutMode);
+  if (probe === 'skip') {
+    report.skip('harness', probeName, 'this image predates the e2e.as stand-in user; fairplay scenario not run');
+    return;
+  }
+  await report.step('harness', probeName, async () => {
+    if (probeError) throw probeError;
+  });
+
+  await restartSut('bot restarts with fairplay on', { JELLYCHORD_ENABLE_FAIRPLAY: '1' });
   // The listener's track plays while the rest is queued; it is long enough
   // that nothing advances meanwhile.
   const since = Date.now();
@@ -261,7 +273,7 @@ async function scenarioFairplay() {
   await report.step('bot-behavior', 'fairplay: two users queue tracks', async () => {
     expectReply(await driver.command('play', { term: a.title, type: 'Soundtrack' }), a.title);
     expectReply(await driver.command('play', { term: b.title, type: 'Soundtrack' }), b.title);
-    expectReply(await driver.command('play', { term: c.title, type: 'Soundtrack', 'e2e.as': STAND_IN_USER_ID }), c.title);
+    expectReply(await driver.command('play', { term: c.title, type: 'Soundtrack', ...asOther }), c.title);
   });
   // Without fairplay the order would be a, b, c.
   await report.step('bot-behavior', 'fairplay: queue alternates between the two users', async () =>
@@ -271,25 +283,18 @@ async function scenarioFairplay() {
     ),
   );
   const skippedAt = Date.now();
-  await report.step('bot-behavior', 'fairplay: tracks play in rotation order through Discord', async () => {
+  await report.step('bot-behavior', 'fairplay: tracks play in rotation order, then the bot leaves voice', async () => {
     expectReply(await driver.command('skip'), 'Skipping current track');
+    // All three tracks, plus time for each to load and for the leave.
+    await orDied(driver.waitForSutVoice(null, (a.seconds + b.seconds + c.seconds) * 1000 + 60_000));
+    const heard = driver.tracker.sequence({ since: skippedAt });
+    // audio of the skipped track still in flight when the skip was sent
+    if (heard[0] === delta.freq) heard.shift();
     const expected = [a.freq, c.freq, b.freq];
-    await orDied(
-      driver.tracker.waitFor(
-        () => {
-          const heard = driver.tracker.sequence({ since: skippedAt });
-          // audio of the skipped track still in flight when the skip was sent
-          if (heard[0] === delta.freq) heard.shift();
-          return heard.join() === expected.join();
-        },
-        (a.seconds + b.seconds + c.seconds) * 1000 + 30_000,
-        `tones ${expected.join(' → ')}`,
-      ),
-    );
+    if (heard.join() !== expected.join()) {
+      throw new Error(`expected tones ${expected.join(' → ')} before the bot left voice, heard ${JSON.stringify(heard)}`);
+    }
   });
-  await report.step('bot-behavior', 'fairplay: bot leaves voice after both queues finish', () =>
-    orDied(driver.waitForSutVoice(null, 30_000)),
-  );
   await restartSut('bot restarts with fairplay off again', { JELLYCHORD_ENABLE_FAIRPLAY: '0' });
 }
 

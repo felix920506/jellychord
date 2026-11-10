@@ -38,7 +38,9 @@ daily on GitHub Actions and opens a GitHub issue when something breaks.
   afterwards; every other scenario runs without it. There is only one Discord
   account, so the second user is a stand-in: a control message may carry
   `e2e.as=<user-id>` to run the command as that (made-up) user ID, sharing
-  the listener's voice state.
+  the listener's voice state. A published image older than `e2e.as` rejects
+  it; on the `image` track the scenario is then recorded as skipped instead
+  of failing. Running from source, it always has to pass.
 * **Listener in Node.** py-cord cannot receive audio over DAVE yet
   ([pycord#3139](https://github.com/Pycord-Development/pycord/issues/3139)),
   while `@discordjs/voice` can.

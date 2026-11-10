@@ -112,6 +112,13 @@ export class Report {
     }
   }
 
+  // Records a step that was not run, and why. It doesn't fail the run.
+  skip(layer, name, reason) {
+    if (!LAYERS[layer]) throw new Error(`unknown layer ${layer}`);
+    this.steps.push({ layer, name, status: 'skipped', reason, durationMs: 0 });
+    this.log(`⏭ [${layer}] ${name}: ${reason}`);
+  }
+
   get failedStep() {
     return this.steps.find((s) => s.status === 'failed') ?? null;
   }
@@ -141,11 +148,14 @@ export class Report {
 // Markdown for the job summary and the GitHub issue's technical section.
 export function renderMarkdown(report) {
   const lines = [];
-  const icon = { passed: '✅', failed: '❌', running: '⏳' };
+  const icon = { passed: '✅', failed: '❌', running: '⏳', skipped: '⏭️' };
   lines.push(`**Result:** ${report.ok ? '✅ passed' : `❌ failed at \`${report.failure.layer}\` — ${report.failure.title}`}`);
   if (report.failure) lines.push('', '```', report.failure.error, '```');
   lines.push('', '| | Layer | Step | Time |', '|---|---|---|---|');
-  for (const s of report.steps) lines.push(`| ${icon[s.status]} | ${s.layer} | ${s.name} | ${((s.durationMs ?? 0) / 1000).toFixed(1)} s |`);
+  for (const s of report.steps) {
+    const name = s.status === 'skipped' ? `${s.name} (skipped: ${s.reason})` : s.name;
+    lines.push(`| ${icon[s.status]} | ${s.layer} | ${name} | ${((s.durationMs ?? 0) / 1000).toFixed(1)} s |`);
+  }
   if (Object.keys(report.meta).length) {
     lines.push('', '<details><summary>Run metadata</summary>', '', '```json', JSON.stringify(report.meta, null, 2), '```', '</details>');
   }

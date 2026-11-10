@@ -45,7 +45,7 @@ export class Driver {
     this.sutVoiceChannel = null;
     this.sutVoiceEvents = [];
     this.replyWaiters = new Map();
-    this.readyWaiters = [];
+    this.readyWaiters = new Set();
     this.readyCount = 0;
     this.connection = null;
     this.subscription = null;
@@ -84,7 +84,7 @@ export class Driver {
     const text = parts.slice(4).join(' ');
     if (requestId === '-' && text === 'ready') {
       this.readyCount++;
-      for (const resolve of this.readyWaiters.splice(0)) resolve();
+      for (const check of [...this.readyWaiters]) check();
       return;
     }
     const waiter = this.replyWaiters.get(requestId);
@@ -97,14 +97,14 @@ export class Driver {
   // Resolves once the bot under test has announced ready `count` times in
   // this run (it announces again after a restart, or a gateway reconnect).
   waitForSutReady(timeoutMs, count = 1) {
-    return withTimeout(
-      new Promise((resolve) => {
-        const check = () => (this.readyCount >= count ? resolve() : this.readyWaiters.push(check));
-        check();
-      }),
-      timeoutMs,
-      'bot under test to announce ready',
-    );
+    let check;
+    const ready = new Promise((resolve) => {
+      check = () => this.readyCount >= count && resolve();
+      this.readyWaiters.add(check);
+      check();
+    });
+    // Also on timeout, so a later announcement doesn't call a settled waiter.
+    return withTimeout(ready, timeoutMs, 'bot under test to announce ready').finally(() => this.readyWaiters.delete(check));
   }
 
   // Sends a command to the SUT and resolves with its first reply text.
