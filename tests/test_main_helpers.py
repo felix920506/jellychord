@@ -27,6 +27,11 @@ def make_discord_stub():
     class FakeView:
         def __init__(self, *args, **kwargs):
             self.items = []
+            self.stopped = False
+            self.message = None
+
+        def stop(self):
+            self.stopped = True
 
         def add_item(self, item):
             item.view = self

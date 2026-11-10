@@ -466,12 +466,17 @@ class searchDropdown(discord.ui.Select):
             self.add_option(label = label, value = str(i))
     
     async def callback(self, interaction: discord.Interaction):
+        # Stop the view before awaiting anything: removing the view from the
+        # message doesn't cancel its timeout, so on_timeout would otherwise
+        # replace "Playing X" with "Selection timed out." later.
+        self.view.stop()
         await interaction.response.edit_message(content=f'Playing {getTrackString(self.items[int(self._selected_values[0])], showType=True)}',view=None)
         await playHelperGeneric(self.items[int(self._selected_values[0])], self.ctx, self.when)
 
-async def onSearchViewTimeout(self: discord.ui.View):
-    self.disable_all_items()
-    await self.message.edit("Selection timed out.", view=None)
+class searchView(discord.ui.View):
+    async def on_timeout(self):
+        self.disable_all_items()
+        await self.message.edit("Selection timed out.", view=None)
 
 def getPageCount(trackCount: int) -> int:
     # Always at least one page, so an empty queue still shows "Page: 1/1".
@@ -579,8 +584,7 @@ async def search(ctx: discord.ApplicationContext,
     elif not ctx.author.voice and not ctx.voice_client:
         await ctx.respond('You are not in any voice channel')
     else:
-        view = discord.ui.View()
-        view.on_timeout = onSearchViewTimeout
+        view = searchView()
         view.add_item(searchDropdown(res, ctx, when, not searchtype))
 
         await ctx.respond('Select an item to play:', view=view)
