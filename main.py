@@ -330,12 +330,16 @@ async def advanceTrack(guild: discord.Guild, error: Exception | None = None, end
 
 async def _advanceTrack(guild: discord.Guild, endedPlayer: object = None):
     failures = 0
+    startPaused = False
     while True:
         vc = guild.voice_client
         if vc is not None and not vc.is_connected():
             # py-cord keeps the voice client and reconnects in the background.
             # Nothing else would restart playback once it's back, so wait here.
             if await waitForVoiceRecovery(guild, vc):
+                # /pause during the wait paused the track the outage cut off;
+                # keep the bot paused on the next one.
+                startPaused = startPaused or playing.get(guild.id, {}).get('paused', False)
                 continue  # recovered, or the voice client changed: look again
             return  # gave up and left voice
         if vc is None:
@@ -365,6 +369,8 @@ async def _advanceTrack(guild: discord.Guild, endedPlayer: object = None):
         if entry is None:
             await stopPlayback(guild, vc)
             return
+        if startPaused:
+            entry['paused'] = True
 
         log.info('Playing %s (%s) in guild %s', entry['Name'], entry['Id'], guild.id)
         # Commands keep running while ffmpeg starts. A skip, /stop or
@@ -427,10 +433,16 @@ async def waitForVoiceRecovery(guild: discord.Guild, vc) -> bool:
     """Wait for py-cord to recover vc's dropped connection. Returns True once
     it is connected again or is no longer the guild's voice client (kicked,
     py-cord gave up), so the caller can look again. If it doesn't recover
-    within VOICE_OUTAGE_TIMEOUT, leaves voice and returns False."""
+    within VOICE_OUTAGE_TIMEOUT, or the queue is empty (/stop, /clear, or
+    nothing left to play), leaves voice and returns False."""
     log.info('Voice connection in guild %s is down, waiting for it to recover', guild.id)
     deadline = time.monotonic() + VOICE_OUTAGE_TIMEOUT
     while guild.voice_client is vc and not vc.is_connected():
+        if not pruneEmptyQueues(guild.id):
+            # Nothing would play after recovery, so don't wait for it.
+            log.info('Nothing queued in guild %s while its voice connection is down, leaving voice', guild.id)
+            await stopPlayback(guild, vc)
+            return False
         if time.monotonic() >= deadline:
             log.warning('Voice connection in guild %s did not recover within %s seconds, leaving voice',
                         guild.id, VOICE_OUTAGE_TIMEOUT)

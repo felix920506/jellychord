@@ -1827,6 +1827,111 @@ class VoiceOutageTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(42, self.main.playing)
         self.assertEqual(queue_ids(self.main.queues[42]), ["second"])
 
+    async def outage_with_stale_player(self, track_ids):
+        """Start playing, then drop the connection so the player gives up and
+        advanceTrack is left waiting for recovery."""
+        voice_client, guild = await self.start(track_ids)
+        voice_client.drop_connection()
+        voice_client.player_times_out()
+        await self.assert_still_waiting(voice_client)
+        return voice_client, guild
+
+    async def test_stop_during_outage_leaves_without_waiting_for_recovery(self):
+        voice_client, guild = await self.outage_with_stale_player(["first", "second"])
+
+        async def reconnect_after_backoff():
+            await asyncio.sleep(10)
+
+        runner = asyncio.create_task(reconnect_after_backoff())
+        self.addCleanup(runner.cancel)
+        voice_client._connection = types.SimpleNamespace(_runner=runner)
+
+        ctx = self.context(guild)
+        await self.main.stop(ctx)
+        self.assertEqual(ctx.responses, ["Stopping playback"])
+        # well within VOICE_OUTAGE_TIMEOUT (5s here)
+        await self.wait_for(lambda: voice_client.disconnect_requested, timeout=1)
+        await self.wait_for(lambda: not self.main.playerLocks[42].locked(), timeout=1)
+        await asyncio.wait([runner], timeout=1)
+
+        self.assertTrue(runner.cancelled())
+        self.assertIsNone(guild.voice_client)
+        self.assertNotIn(42, self.main.playing)
+        self.assertNotIn(42, self.main.queues)
+        self.assertEqual(len(voice_client.play_calls), 1)
+
+    async def test_clear_during_outage_leaves_without_waiting_for_recovery(self):
+        voice_client, guild = await self.outage_with_stale_player(["first", "second"])
+
+        await self.main.clear(self.context(guild))
+        await self.wait_for(lambda: voice_client.disconnect_requested, timeout=1)
+        await self.wait_for(lambda: not self.main.playerLocks[42].locked(), timeout=1)
+
+        self.assertIsNone(guild.voice_client)
+        self.assertNotIn(42, self.main.playing)
+
+    async def test_last_track_ending_during_outage_leaves_right_away(self):
+        voice_client, guild = await self.start(["only"])
+
+        voice_client.drop_connection()
+        voice_client.finish_track()
+        await self.wait_for(lambda: voice_client.disconnect_requested, timeout=1)
+        await self.wait_for(lambda: not self.main.playerLocks[42].locked(), timeout=1)
+
+        self.assertIsNone(guild.voice_client)
+        self.assertNotIn(42, self.main.playing)
+
+    async def test_play_during_outage_is_played_after_recovery(self):
+        voice_client, guild = await self.start(["first"])
+        voice_client.drop_connection()
+        # the track still plays from ffmpeg's buffer when /play queues another
+        self.main.queues[42] = [queue_entry("second")]
+        voice_client.player_times_out()
+        await self.assert_still_waiting(voice_client)
+
+        with self.assertLogs("jellychord", "WARNING"):
+            voice_client.recover_connection()
+            await self.wait_for(lambda: len(voice_client.play_calls) == 2)
+        self.assertEqual(self.main.playing[42]["Id"], "second")
+
+    async def test_skip_during_outage_plays_next_track_after_recovery(self):
+        voice_client, guild = await self.outage_with_stale_player(["first", "second", "third"])
+
+        await self.main.skip(self.context(guild))
+        await self.assert_still_waiting(voice_client)
+        voice_client.recover_connection()
+        await self.wait_for(lambda: len(voice_client.play_calls) == 2)
+
+        self.assertEqual(self.main.playing[42]["Id"], "second")
+        self.assertEqual(queue_ids(self.main.queues[42]), ["third"])
+
+    async def test_playnow_during_outage_plays_chosen_track_after_recovery(self):
+        voice_client, guild = await self.outage_with_stale_player(["first", "second", "third"])
+
+        await self.main.playnow(self.context(guild), 2)
+        await self.assert_still_waiting(voice_client)
+        voice_client.recover_connection()
+        await self.wait_for(lambda: len(voice_client.play_calls) == 2)
+
+        self.assertEqual(self.main.playing[42]["Id"], "third")
+        self.assertEqual(queue_ids(self.main.queues[42]), ["second"])
+
+    async def test_pause_during_outage_starts_next_track_paused(self):
+        voice_client, guild = await self.outage_with_stale_player(["first", "second"])
+        ctx = self.context(guild)
+
+        await self.main.pause(ctx)
+        self.assertEqual(ctx.responses, ["Pausing playback"])
+        with self.assertLogs("jellychord", "WARNING"):
+            voice_client.recover_connection()
+            await self.wait_for(lambda: len(voice_client.play_calls) == 2)
+
+        self.assertEqual(self.main.playing[42]["Id"], "second")
+        self.assertTrue(self.main.playing[42]["paused"])
+        self.assertTrue(voice_client.is_paused())
+        await self.main.resume(ctx)
+        self.assertTrue(voice_client.is_playing())
+
 
 if __name__ == "__main__":
     unittest.main()
