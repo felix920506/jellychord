@@ -47,6 +47,11 @@ def make_discord_stub():
         def __init__(self, *args, **kwargs):
             self.groups = []
             self.run_token = None
+            self.user = None
+            self.listeners = []
+
+        def add_listener(self, func, name):
+            self.listeners.append((name, func))
 
         def create_group(self, *args, **kwargs):
             self.groups.append((args, kwargs))
@@ -78,6 +83,8 @@ def make_discord_stub():
     discord.ApplicationContext = type("ApplicationContext", (), {})
     discord.Interaction = type("Interaction", (), {})
     discord.Guild = type("Guild", (), {})
+    discord.Member = type("Member", (), {})
+    discord.VoiceState = type("VoiceState", (), {})
     discord.FFmpegOpusAudio = FakeFFmpegOpusAudio
     discord.ui = types.SimpleNamespace(Select=FakeSelect, Button=FakeButton, View=FakeView)
     discord.ext = discord_ext
