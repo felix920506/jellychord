@@ -474,6 +474,18 @@ class searchDropdown(discord.ui.Select):
         await playHelperGeneric(self.items[int(self._selected_values[0])], self.ctx, self.when)
 
 class searchView(discord.ui.View):
+    def __init__(self, ownerId: int):
+        super(searchView, self).__init__()
+        self.ownerId = ownerId
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        # The reply is public, so only the user who ran /search may pick:
+        # the track is queued (and the bot joins voice) on their behalf.
+        return interaction.user.id == self.ownerId
+
+    async def on_check_failure(self, interaction: discord.Interaction):
+        await interaction.response.send_message('Only the user who ran this search can pick an item.', ephemeral=True)
+
     async def on_timeout(self):
         self.disable_all_items()
         await self.message.edit("Selection timed out.", view=None)
@@ -584,7 +596,7 @@ async def search(ctx: discord.ApplicationContext,
     elif not ctx.author.voice and not ctx.voice_client:
         await ctx.respond('You are not in any voice channel')
     else:
-        view = searchView()
+        view = searchView(ctx.author.id)
         view.add_item(searchDropdown(res, ctx, when, not searchtype))
 
         await ctx.respond('Select an item to play:', view=view)
