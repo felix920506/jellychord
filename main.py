@@ -392,6 +392,10 @@ async def _advanceTrack(guild: discord.Guild, endedPlayer: object = None):
         finally:
             loading.pop(guild.id)
         skipped = skipRequested.is_set()
+        if skipped:
+            # Skipping a paused track drops its pause, so a later outage
+            # recovery doesn't carry it over to the next one.
+            entry['paused'] = False
 
         if loadError is not None:
             if skipped:

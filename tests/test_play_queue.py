@@ -2004,6 +2004,42 @@ class VoiceOutageTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.main.playing[42]["paused"])
         self.assertTrue(voice_client.is_playing())
 
+    async def test_skipping_carried_over_pause_track_before_second_outage_drops_pause(self):
+        voice_client, guild = await self.outage_with_stale_player(["first", "second", "third"])
+        ctx = self.context(guild)
+        load_started = threading.Event()
+        release = threading.Event()
+        self.addCleanup(release.set)
+        real_audio_class = self.main.discord.FFmpegOpusAudio
+
+        class BlockingSecondAudio(real_audio_class):
+            def read(self):
+                if "/second?" in self.url:
+                    load_started.set()
+                    release.wait(5)
+                return super().read()
+
+        patch = mock.patch.object(self.main.discord, "FFmpegOpusAudio", BlockingSecondAudio)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+        await self.main.pause(ctx)
+        voice_client.recover_connection()
+        await self.wait_for(load_started.is_set)
+        self.assertTrue(self.main.playing[42]["paused"])
+        # the connection drops again and the paused, still-loading track is skipped
+        voice_client.drop_connection()
+        await self.main.skip(ctx)
+        await self.assert_still_waiting(voice_client)
+        release.set()
+        voice_client.recover_connection()
+        await self.wait_for(lambda: len(voice_client.play_calls) == 2)
+
+        self.assertEqual(ctx.responses, ["Pausing playback", "Skipping current track"])
+        self.assertEqual(self.main.playing[42]["Id"], "third")
+        self.assertFalse(self.main.playing[42]["paused"])
+        self.assertTrue(voice_client.is_playing())
+
     async def test_pause_while_track_fails_to_load_starts_next_track_paused(self):
         voice_client, guild = await self.start(["first", "second", "third"])
         ctx = self.context(guild)
