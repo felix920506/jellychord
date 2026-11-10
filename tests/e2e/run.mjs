@@ -370,13 +370,20 @@ try {
   const jellyfinLogs = jellyfin ? await jellyfin.logs() : '';
   await jellyfin?.stop();
 
-  const json = redactor.json(report.toJSON());
-  await mkdir(cfg.resultsDir, { recursive: true });
-  await writeFile(path.join(cfg.resultsDir, 'report.json'), JSON.stringify(json, null, 2));
-  await writeFile(path.join(cfg.resultsDir, 'summary.md'), renderMarkdown(json));
-  await writeFile(path.join(cfg.resultsDir, 'sut.log'), redactor.text(sut?.lines.join('\n') ?? ''));
-  await writeFile(path.join(cfg.resultsDir, 'listener.log'), redactor.text(driverLog.join('\n')));
-  await writeFile(path.join(cfg.resultsDir, 'jellyfin.log'), redactor.text(jellyfinLogs));
+  let json;
+  try {
+    json = redactor.json(report.toJSON());
+    await mkdir(cfg.resultsDir, { recursive: true });
+    await writeFile(path.join(cfg.resultsDir, 'report.json'), JSON.stringify(json, null, 2));
+    await writeFile(path.join(cfg.resultsDir, 'summary.md'), renderMarkdown(json));
+    await writeFile(path.join(cfg.resultsDir, 'sut.log'), redactor.text(sut?.lines.join('\n') ?? ''));
+    await writeFile(path.join(cfg.resultsDir, 'listener.log'), redactor.text(driverLog.join('\n')));
+    await writeFile(path.join(cfg.resultsDir, 'jellyfin.log'), redactor.text(jellyfinLogs));
+  } catch (err) {
+    // Never print unredacted data; just make the failure visible.
+    console.error(`failed to write results: ${err.message}`);
+    process.exit(1);
+  }
   console.log(`\n${json.ok ? 'PASSED' : `FAILED at ${json.failure.layer}: ${json.failure.step}`} — results in ${cfg.resultsDir}`);
   process.exit(json.ok ? 0 : exitCode || 1);
 }
