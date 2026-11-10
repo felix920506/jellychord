@@ -20,6 +20,10 @@ search-limit: 25
 # Gives each user a fair chance to play their tracks
 fairplay: false
 
+# Log level: DEBUG, INFO, WARNING, ERROR or CRITICAL (default INFO)
+# When configured through environment variables (docker), use JELLYCHORD_LOG_LEVEL
+log-level: "INFO"
+
 # debug mode
 # when debug mode is enabled, commands will only be exposed to the specified debug server
 # debug commands will also be enabled

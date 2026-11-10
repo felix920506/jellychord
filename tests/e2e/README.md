@@ -121,7 +121,7 @@ CI is split in two:
 
 ## Running locally
 
-Requires Docker, Node ≥ 22.12, and, for source mode, Python 3.12 with the
+Requires Docker, Node ≥ 22.12, and, for source mode, Python 3.14 with the
 bot's dependencies and `ffmpeg` on `PATH`.
 
 ```sh

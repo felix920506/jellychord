@@ -6,7 +6,7 @@
 
 # Want to help us make this template better? Share your feedback here: https://forms.gle/ybq9Krt8jtBL3iCk7
 
-ARG PYTHON_VERSION=3.12.2
+ARG PYTHON_VERSION=3.14.10
 FROM python:${PYTHON_VERSION}-alpine AS base
 
 # add ffmpeg

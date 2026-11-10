@@ -4,8 +4,8 @@ import asyncio
 import yaml
 import random
 import datetime
-import logging
 import os
+import logging
 from itertools import zip_longest
 
 from jfapi import JFAPI
@@ -27,7 +27,8 @@ else:
         'command-group': os.getenv('JELLYCHORD_COMMAND_GROUP'),
         'search-limit': os.getenv('JELLYCHORD_SEARCH_LIMIT'),
         'enable-debug': os.getenv('JELLYCHORD_ENABLE_DEBUG') == '1',
-        'fairplay': os.getenv('JELLYCHORD_ENABLE_FAIRPLAY') == '1'
+        'fairplay': os.getenv('JELLYCHORD_ENABLE_FAIRPLAY') == '1',
+        'log-level': os.getenv('JELLYCHORD_LOG_LEVEL'),
     }
 
     if not config['search-limit']:
@@ -40,6 +41,20 @@ else:
 
     if config['enable-debug']:
         config['debug-server'] = int(os.getenv('JELLYCHORD_DEBUG_SERVER'))
+
+'''
+Logging
+'''
+# The E2E hook's log level takes precedence: once logging is configured
+# here, the hook's own basicConfig() call is a no-op.
+LOG_LEVEL = str(os.getenv('JELLYCHORD_E2E_LOG_LEVEL') or config.get('log-level') or 'INFO').upper()
+logging.basicConfig(
+    level=logging.getLevelNamesMapping().get(LOG_LEVEL, logging.INFO),
+    format='%(asctime)s %(levelname)s %(name)s: %(message)s',
+)
+log = logging.getLogger('jellychord')
+if LOG_LEVEL not in logging.getLevelNamesMapping():
+    log.warning('Unknown log level %r, using INFO', LOG_LEVEL)
 
 JF_APICLIENT = JFAPI(config['jf-server'],config['jf-apikey'])
 LIMIT = max(1, min(config['search-limit'], 25))
@@ -56,8 +71,6 @@ playing = {}
 # guild id -> True if a skip was requested while the next track was loading
 loading = {}
 playerLocks = {}
-
-log = logging.getLogger('jellychord')
 
 bot = discord.Bot()
 
@@ -90,7 +103,13 @@ async def playHelperGeneric(item: dict, ctx: discord.ApplicationContext, positio
         entries = [getItemEntry(i) for i in tracks]
     else:
         entries = [getItemEntry(item)]
-    
+
+    if not entries:
+        # an empty queue would make the player pop from an empty list
+        log.warning('Album %s has no tracks, nothing queued', item['Id'])
+        await ctx.respond('That album has no tracks to play')
+        return
+
     fairplay = config.get('fairplay')
 
     # insert the item(s) into the queue
@@ -147,11 +166,23 @@ def skipCurrentTrack(guild: discord.Guild):
     if guild.voice_client:
         guild.voice_client.stop()
 
+def pruneEmptyQueues(guildId: int) -> bool:
+    """Drop empty queues for the guild. Returns True if any tracks are left."""
+    queue = queues.get(guildId)
+    if queue is None:
+        return False
+    if config.get('fairplay'):
+        for userId in [uid for uid, tracks in queue.items() if not tracks]:
+            queue.pop(userId)
+    if not queue:
+        queues.pop(guildId)
+        return False
+    return True
+
 def popNextEntry(guildId: int) -> dict | None:
     """Take the next track off the guild's queue and make it the playing entry.
     Returns None when the queue is empty. Must run on the event loop."""
-    if guildId not in queues:
-        playing.pop(guildId, None)
+    if not pruneEmptyQueues(guildId):
         return None
 
     fairplay = config.get('fairplay')
@@ -166,12 +197,14 @@ def popNextEntry(guildId: int) -> dict | None:
         # find the next user to play from
         userIds = list(queues[guildId].keys())
         thisIdx = userIds.index(thisTrackUser) if thisTrackUser in userIds else -1
-        nextIdx = (thisIdx + 1) % len(userIds)
-
         # clean up any empty queues for users
         if not queues[guildId][thisTrackUser]:
             queues[guildId].pop(thisTrackUser)
-            nextIdx -= 1
+            # the following user has shifted into thisIdx; wrap if this user was last
+            remaining = len(queues[guildId])
+            nextIdx = thisIdx % remaining if remaining else 0
+        else:
+            nextIdx = (thisIdx + 1) % len(userIds)
 
         entry['nextTrackUserIdx'] = nextIdx
         entry['nextTrackUser'] = None
@@ -200,10 +233,14 @@ def onTrackEnd(loop: asyncio.AbstractEventLoop, guild: discord.Guild, error: Exc
     # Runs on the voice player thread: hand off to the event loop and return.
     asyncio.run_coroutine_threadsafe(advanceTrack(guild, error), loop)
 
+# How many tracks advanceTrack will try to start, one after another, before
+# giving up and leaving the voice channel.
+MAX_START_ATTEMPTS = 3
+
 async def advanceTrack(guild: discord.Guild, error: Exception | None = None):
-    """Play the next queued track, or disconnect when the queue is empty."""
-    if error:
-        log.error('Playback of a track in guild %s failed', guild.id, exc_info=error)
+    """Play the next queued track, or leave the voice channel if there is none."""
+    if error is not None:
+        log.error('Playback error in guild %s', guild.id, exc_info=error)
     lock = playerLocks.setdefault(guild.id, asyncio.Lock())
     try:
         async with lock:
@@ -213,20 +250,28 @@ async def advanceTrack(guild: discord.Guild, error: Exception | None = None):
         log.exception('Could not start the next track in guild %s', guild.id)
 
 async def _advanceTrack(guild: discord.Guild):
+    failures = 0
     while True:
         vc = guild.voice_client
         if vc is None or not vc.is_connected():
+            # Disconnected (kicked, network drop...) before we got here.
+            log.info('No voice connection in guild %s, stopping playback', guild.id)
             playing.pop(guild.id, None)
             return
         if vc.is_playing() or vc.is_paused():
             # a track is already playing; only its end may advance the queue
             return
+        if failures >= MAX_START_ATTEMPTS:
+            log.error('Giving up on playback in guild %s after %d failed attempts', guild.id, failures)
+            await stopPlayback(guild, vc)
+            return
 
         entry = popNextEntry(guild.id)
         if entry is None:
-            await vc.disconnect()
+            await stopPlayback(guild, vc)
             return
 
+        log.info('Playing %s (%s) in guild %s', entry['Name'], entry['Id'], guild.id)
         url = JF_APICLIENT.getAudioHls(entry["Id"], vc.channel.bitrate)
         # Commands keep running while ffmpeg starts. A skip, /stop or
         # when=now in that window sets loading[guild.id], so this track is dropped.
@@ -234,7 +279,9 @@ async def _advanceTrack(guild: discord.Guild):
         try:
             audio = await asyncio.to_thread(loadAudio, url)
         except Exception:
-            log.exception('Could not load track %s in guild %s', entry["Id"], guild.id)
+            failures += 1
+            log.exception('Failed to start the next track in guild %s (attempt %d/%d)',
+                          guild.id, failures, MAX_START_ATTEMPTS)
             continue
         finally:
             skipped = loading.pop(guild.id)
@@ -250,17 +297,26 @@ async def _advanceTrack(guild: discord.Guild):
         try:
             vc.play(audio, after=lambda e: onTrackEnd(loop, guild, e))
         except Exception:
-            # No player started, so no after= callback will ever advance the
-            # queue. Leave voice so /start can pick up the remaining tracks.
-            log.exception('Could not play track %s in guild %s', entry["Id"], guild.id)
+            # The player never took ownership of the source, so stop ffmpeg here.
             audio.cleanup()
-            playing.pop(guild.id, None)
-            await vc.disconnect(force=True)
-            return
+            failures += 1
+            log.exception('Failed to start the next track in guild %s (attempt %d/%d)',
+                          guild.id, failures, MAX_START_ATTEMPTS)
+            continue
         if entry['paused']:
             # /pause arrived while the track was loading
             vc.pause()
         return
+
+async def stopPlayback(guild: discord.Guild, vc):
+    """Forget the current track and leave the voice channel. Tracks still
+    queued are kept, so /start can pick them up."""
+    playing.pop(guild.id, None)
+    try:
+        await vc.disconnect(force=True)
+    except Exception:
+        log.exception('Failed to disconnect from voice in guild %s', guild.id)
+
 
 def getTrackString(item: dict, artistLimit: int = 1, showType: bool = False, showSize: bool = False):
 
@@ -302,7 +358,8 @@ def getFlattenedPlayQueue(guildId: int) -> list[dict]:
     if not config.get('fairplay'):
         return queues[guildId]
     else:
-        nextTrackUserIdx = playing[guildId].get('nextTrackUserIdx') % len(queues[guildId])
+        # nothing may be playing, e.g. after playback gave up with tracks still queued
+        nextTrackUserIdx = playing.get(guildId, {}).get('nextTrackUserIdx', 0) % len(queues[guildId])
         userIds = list(queues[guildId].keys())
         orderedUserIds = userIds[nextTrackUserIdx:]+userIds[:nextTrackUserIdx]
         orderedTrackLists = [queues[guildId][uid] for uid in orderedUserIds]

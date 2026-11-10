@@ -6,7 +6,7 @@ authors = ["felix920506 <felix920506@gmail.com>"]
 readme = "README.md"
 
 [tool.poetry.dependencies]
-python = ">=3.12, <3.13"
+python = ">=3.14, <3.15"
 py-cord = {version = ">=2.8.0rc2,<2.9.0", extras = ["voice"]}
 pyyaml = "^6.0.2"
 

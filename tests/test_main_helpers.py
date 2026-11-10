@@ -95,6 +95,7 @@ def import_main_with_stubs():
         "JELLYCHORD_SEARCH_LIMIT": "25",
         "JELLYCHORD_ENABLE_DEBUG": "0",
         "JELLYCHORD_ENABLE_FAIRPLAY": "0",
+        "JELLYCHORD_LOG_LEVEL": "WARNING",
     }
 
     sys.modules.pop("main", None)
