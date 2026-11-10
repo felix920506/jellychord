@@ -3,6 +3,7 @@ import unittest
 
 import aiohttp
 
+from jfapi import JellyfinResponseError
 from tests.test_main_helpers import import_main_with_stubs
 
 
@@ -53,6 +54,7 @@ ERRORS = {
     "http 500": lambda: http_error(500),
     "connection refused": lambda: aiohttp.ClientConnectionError("refused"),
     "timeout": lambda: TimeoutError(),
+    "malformed response": lambda: JellyfinResponseError("no Items"),
 }
 
 
@@ -111,6 +113,48 @@ class JellyfinErrorReplyTests(unittest.IsolatedAsyncioTestCase):
             await self.main.playHelperGeneric({"Type": "MusicAlbum", "Id": "album-1"}, ctx, "last")
 
         await self.run_with_errors("getAlbumTracks", command)
+
+
+class AlbumThenFailure(FailingJFAPI):
+    """The search finds an album, fetching its tracks fails."""
+
+    async def search(self, *args, **kwargs):
+        self.calls.append("search")
+        return [{"Type": "MusicAlbum", "Id": "album-1", "Name": "Album"}]
+
+    async def getItemsByIds(self, ids):
+        self.calls.append("getItemsByIds")
+        return [{"Type": "MusicAlbum", "Id": "album-1", "Name": "Album"}]
+
+
+class AlbumAnnouncementTests(unittest.IsolatedAsyncioTestCase):
+    """"Playing X" isn't sent before an album lookup that then fails."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.main = import_main_with_stubs(
+            {"JELLYCHORD_ENABLE_DEBUG": "1", "JELLYCHORD_DEBUG_SERVER": "1234"}
+        )
+
+    def setUp(self):
+        self.main.queues.clear()
+        self.main.config["fairplay"] = False
+
+    async def test_play_album_failure_replies_only_with_error(self):
+        self.main.JF_APICLIENT = AlbumThenFailure(http_error(500))
+        ctx = DeferringContext()
+        with self.assertLogs("jellychord", "ERROR"):
+            await self.main.play(ctx, "term", None, "last")
+        self.assertEqual(ctx.responses, [self.main.JELLYFIN_ERROR_MESSAGE])
+        self.assertEqual(self.main.queues, {})
+
+    async def test_playbyid_album_failure_replies_only_with_error(self):
+        self.main.JF_APICLIENT = AlbumThenFailure(http_error(500))
+        ctx = DeferringContext()
+        with self.assertLogs("jellychord", "ERROR"):
+            await self.main.playbyid(ctx, "album-1", "last")
+        self.assertEqual(ctx.responses, [self.main.JELLYFIN_ERROR_MESSAGE])
+        self.assertEqual(self.main.queues, {})
 
 
 class ShutdownTests(unittest.IsolatedAsyncioTestCase):

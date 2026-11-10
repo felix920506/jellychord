@@ -10,7 +10,7 @@ import time
 import logging
 import sys
 
-from jfapi import JFAPI
+from jfapi import JFAPI, JellyfinResponseError
 from jellychord.config import ConfigError, load_config
 
 '''
@@ -105,9 +105,10 @@ async def searchHelper(term: str, limit: int = LIMIT, searchType:str = None):
     res = await JF_APICLIENT.search(term, limit, searchType)
     return res
 
-# What a Jellyfin request raises when the server can't be reached, times out
-# or answers with an HTTP error (JFAPI calls raise_for_status).
-JELLYFIN_ERRORS = (aiohttp.ClientError, TimeoutError)
+# What a Jellyfin request raises when the server can't be reached, times out,
+# answers with an HTTP error (JFAPI calls raise_for_status) or with a body
+# that isn't the expected JSON.
+JELLYFIN_ERRORS = (aiohttp.ClientError, TimeoutError, JellyfinResponseError)
 JELLYFIN_ERROR_MESSAGE = "Couldn't reach the Jellyfin server. Please try again later."
 
 async def reportJellyfinError(ctx: discord.ApplicationContext):
@@ -129,7 +130,10 @@ def getItemEntry(item: dict) -> dict:
         "Length": getItemLength(item)
     }
 
-async def playHelperGeneric(item: dict, ctx: discord.ApplicationContext, position: str):
+async def playHelperGeneric(item: dict, ctx: discord.ApplicationContext, position: str,
+                            announcement: str | None = None):
+    # announcement ("Playing X") is sent once the tracks are known, so a failed
+    # or empty album lookup doesn't follow it with an error.
     entries = []
     if item["Type"] == "MusicAlbum":
         try:
@@ -146,6 +150,9 @@ async def playHelperGeneric(item: dict, ctx: discord.ApplicationContext, positio
         log.warning('Album %s has no tracks, nothing queued', item['Id'])
         await ctx.respond('That album has no tracks to play')
         return
+
+    if announcement:
+        await ctx.respond(announcement)
 
     fairplay = config.get('fairplay')
 
@@ -859,8 +866,8 @@ async def play(ctx: discord.ApplicationContext,
     elif not ctx.author.voice and not ctx.voice_client:
         await ctx.respond('You are not in any voice channel')
     else:
-        await ctx.respond(f'Playing {getTrackString(res[0], showType=True)}')
-        await playHelperGeneric(res[0], ctx, when)
+        await playHelperGeneric(res[0], ctx, when,
+                                announcement=f'Playing {getTrackString(res[0], showType=True)}')
 
 @cmdgrp.command()
 async def skip(ctx: discord.ApplicationContext):
@@ -1081,8 +1088,8 @@ if DEBUG:
         elif not ctx.author.voice:
             await ctx.respond('You are not in any voice channel')
         else:
-            await ctx.respond(f'Playing {getTrackString(res[0], showType=True)}')
-            await playHelperGeneric(res[0], ctx, when)
+            await playHelperGeneric(res[0], ctx, when,
+                                    announcement=f'Playing {getTrackString(res[0], showType=True)}')
     
     @dbgcmd.command()
     async def printplaylist(ctx: discord.ApplicationContext):

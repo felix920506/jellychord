@@ -5,7 +5,7 @@ import aiohttp
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
-from jfapi import JFAPI
+from jfapi import JFAPI, JellyfinResponseError
 
 
 class FakeResponse:
@@ -150,6 +150,21 @@ class JFAPIServerTests(unittest.IsolatedAsyncioTestCase):
                         with self.assertRaises(aiohttp.ClientResponseError) as cm:
                             await call()
                         self.assertEqual(cm.exception.status, reply[0])
+
+    async def test_malformed_success_raises_jellyfin_response_error(self):
+        replies = {
+            "no Items": (200, '{"TotalRecordCount": 0}', "application/json"),
+            "Items not a list": (200, '{"Items": null}', "application/json"),
+            "not an object": (200, '[]', "application/json"),
+            "invalid JSON": (200, '{"Items": [', "application/json"),
+        }
+        async with JFAPI(self.serverUrl, "secret-key") as api:
+            for reply_name, reply in replies.items():
+                for name, call in self.calls(api).items():
+                    with self.subTest(reply=reply_name, call=name):
+                        self.reply = reply
+                        with self.assertRaises(JellyfinResponseError):
+                            await call()
 
     async def test_success_returns_items(self):
         async with JFAPI(self.serverUrl, "secret-key") as api:

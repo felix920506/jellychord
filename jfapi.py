@@ -1,6 +1,10 @@
 import aiohttp
 import urllib.parse
 
+class JellyfinResponseError(Exception):
+    """Jellyfin answered with a success status but the body isn't the
+    expected JSON (invalid JSON, or no list under 'Items')."""
+
 class JFAPI():
     def __init__(self, server: str, apikey: str) -> None:
         self.__apikey = apikey
@@ -27,12 +31,21 @@ class JFAPI():
         if not self._session:
             self._session = aiohttp.ClientSession()
 
-    # Raises aiohttp.ClientResponseError if Jellyfin answers with an HTTP error.
+    # Raises aiohttp.ClientResponseError if Jellyfin answers with an HTTP error
+    # (or a non-JSON content type), JellyfinResponseError if a success body
+    # isn't JSON with an 'Items' list.
     async def __getItems(self, params: dict) -> list:
         await self.checkSession()
         async with self._session.get(self.__getEndpointUrl('/Items'), params=params) as res:
             res.raise_for_status()
-            return (await res.json())['Items']
+            try:
+                body = await res.json()
+            except ValueError as e:  # json.JSONDecodeError
+                raise JellyfinResponseError(f'GET /Items returned invalid JSON: {e}') from e
+        items = body.get('Items') if isinstance(body, dict) else None
+        if not isinstance(items, list):
+            raise JellyfinResponseError("GET /Items response has no 'Items' list")
+        return items
 
     # https://api.jellyfin.org/#tag/Items/operation/GetItems
     # GET /Items
