@@ -8,7 +8,6 @@ import os
 import math
 import time
 import logging
-from itertools import zip_longest
 
 from jfapi import JFAPI
 
@@ -431,23 +430,45 @@ def formatTimeSecs(secs: int, force_hrs: bool = False) -> str:
     else:
         return f'{m:02d}:{s:02d}'
 
+def getFairplayQueueOrder(guildId: int) -> list[tuple[int, int]]:
+    """(userId, position in that user's queue) for each fairplay queue entry,
+    in the order they will play."""
+    if not guildId in queues:
+        return []
+    # nothing may be playing, e.g. after playback gave up with tracks still queued
+    nextTrackUserIdx = playing.get(guildId, {}).get('nextTrackUserIdx', 0) % len(queues[guildId])
+    userIds = list(queues[guildId].keys())
+    orderedUserIds = userIds[nextTrackUserIdx:]+userIds[:nextTrackUserIdx]
+
+    order = []
+    longest = max(len(queues[guildId][uid]) for uid in orderedUserIds)
+    for pos in range(longest):
+        order.extend((uid, pos) for uid in orderedUserIds if pos < len(queues[guildId][uid]))
+    return order
+
 def getFlattenedPlayQueue(guildId: int) -> list[dict]:
     if not guildId in queues:
         return []
     if not config.get('fairplay'):
         return queues[guildId]
     else:
-        # nothing may be playing, e.g. after playback gave up with tracks still queued
-        nextTrackUserIdx = playing.get(guildId, {}).get('nextTrackUserIdx', 0) % len(queues[guildId])
-        userIds = list(queues[guildId].keys())
-        orderedUserIds = userIds[nextTrackUserIdx:]+userIds[:nextTrackUserIdx]
-        orderedTrackLists = [queues[guildId][uid] for uid in orderedUserIds]
+        return [queues[guildId][uid][pos] for uid, pos in getFairplayQueueOrder(guildId)]
 
-        tracks = []
-        for i in zip_longest(*orderedTrackLists, fillvalue=None):
-            tracks.extend([j for j in i if j is not None])
-
-        return tracks
+def removeFairplayUser(guildId: int, userId: int):
+    """Drop a user's queue, keeping the user who is due next due next."""
+    userIds = list(queues[guildId].keys())
+    removedIdx = userIds.index(userId)
+    queues[guildId].pop(userId)
+    remaining = len(queues[guildId])
+    if guildId in playing and 'nextTrackUserIdx' in playing[guildId]:
+        nextIdx = playing[guildId]['nextTrackUserIdx'] % len(userIds)
+        if removedIdx < nextIdx:
+            nextIdx -= 1
+        # if removedIdx == nextIdx the following user shifts into nextIdx;
+        # wrap if the removed user was last
+        playing[guildId]['nextTrackUserIdx'] = nextIdx % remaining if remaining else 0
+    if not remaining:
+        queues.pop(guildId)
 
 '''
 Discord View Related
@@ -731,17 +752,11 @@ async def remove(ctx: discord.ApplicationContext,
                 queues.pop(ctx.guild_id)
             await ctx.respond(f'Deleted track: {getTrackString(item)}')
         else:
-            target = guildqueue[index-1]
-            for userId in queues[ctx.guild_id]:
-                for item in queues[ctx.guild_id][userId]:
-                    if item['Id'] == target['Id']:
-                        queues[ctx.guild_id][userId].remove(item)
-                        if not queues[ctx.guild_id][userId]:
-                            queues[ctx.guild_id].pop(userId)
-                        if not queues[ctx.guild_id]:
-                            queues.pop(ctx.guild_id)
-                        await ctx.respond(f'Deleted track: {getTrackString(item)}')
-                        return
+            userId, pos = getFairplayQueueOrder(ctx.guild_id)[index-1]
+            item = queues[ctx.guild_id][userId].pop(pos)
+            if not queues[ctx.guild_id][userId]:
+                removeFairplayUser(ctx.guild_id, userId)
+            await ctx.respond(f'Deleted track: {getTrackString(item)}')
 
 @cmdgrp.command()
 async def promote(ctx: discord.ApplicationContext,
@@ -758,15 +773,14 @@ async def promote(ctx: discord.ApplicationContext,
             queues[ctx.guild_id].insert(0, item)
             await ctx.respond(f'Promoted track to the front: {getTrackString(item)}')
         else:
-            target = guildqueue[index-1]
-            for item in queues[ctx.guild_id].get(ctx.author.id, []):
-                if item['Id'] == target['Id']:
-                    queues[ctx.guild_id][ctx.author.id].remove(item)
-                    queues[ctx.guild_id][ctx.author.id].insert(0, item)
-                    await ctx.respond(f'Promoted track to the front of your tracks: {getTrackString(item)}')
-                    return
-            else:
+            userId, pos = getFairplayQueueOrder(ctx.guild_id)[index-1]
+            if userId != ctx.author.id:
                 await ctx.respond('You can only promote your own tracks in fairplay mode', ephemeral=True)
+            else:
+                userQueue = queues[ctx.guild_id][userId]
+                item = userQueue.pop(pos)
+                userQueue.insert(0, item)
+                await ctx.respond(f'Promoted track to the front of your tracks: {getTrackString(item)}')
 
 @cmdgrp.command()
 async def demote(ctx: discord.ApplicationContext,
@@ -783,15 +797,14 @@ async def demote(ctx: discord.ApplicationContext,
             queues[ctx.guild_id].append(item)
             await ctx.respond(f'Demoted track to the back: {getTrackString(item)}')
         else:
-            target = guildqueue[index-1]
-            for item in queues[ctx.guild_id].get(ctx.author.id, []):
-                if item['Id'] == target['Id']:
-                    queues[ctx.guild_id][ctx.author.id].remove(item)
-                    queues[ctx.guild_id][ctx.author.id].append(item)
-                    await ctx.respond(f'Demoted track to the back of your tracks: {getTrackString(item)}')
-                    return
-            else:
+            userId, pos = getFairplayQueueOrder(ctx.guild_id)[index-1]
+            if userId != ctx.author.id:
                 await ctx.respond('You can only demote your own tracks in fairplay mode', ephemeral=True)
+            else:
+                userQueue = queues[ctx.guild_id][userId]
+                item = userQueue.pop(pos)
+                userQueue.append(item)
+                await ctx.respond(f'Demoted track to the back of your tracks: {getTrackString(item)}')
 
 if not config.get('fairplay'):
     # playnow command is disabled in fairplay mode since it would defeat the whole point
