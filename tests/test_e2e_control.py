@@ -198,6 +198,20 @@ class InstallTests(unittest.TestCase):
         self.assertIn('error UnknownCommand: nope', self.channel.sent[0][0])
         self.assertIn("error ParseError: missing required option 'term'", self.channel.sent[1][0])
 
+    def test_runs_command_as_stand_in_user(self):
+        self.send(f'<@{BOT_ID}> e2e {NONCE} r1 play term=x e2e.as=555')
+        ctx, term, searchtype, when = self.calls[0]
+        self.assertEqual((term, searchtype, when), ('x', None, 'last'))
+        self.assertEqual(ctx.author.id, 555)
+        # everything else, voice state included, is the driver's
+        self.assertEqual(ctx.author.voice, 'in-voice')
+        self.assertEqual(self.member.id, DRIVER_ID)
+
+    def test_rejects_non_numeric_stand_in_user(self):
+        self.send(f'<@{BOT_ID}> e2e {NONCE} r1 play term=x e2e.as=someone')
+        self.assertEqual(self.calls, [])
+        self.assertIn('error ParseError: e2e.as must be a numeric user ID', self.channel.sent[0][0])
+
     def test_builtin_ping_and_diag(self):
         self.send(f'<@{BOT_ID}> e2e {NONCE} r6 ping')
         self.send(f'<@{BOT_ID}> e2e {NONCE} r7 diag')

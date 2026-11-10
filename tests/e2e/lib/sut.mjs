@@ -14,12 +14,18 @@ export class Sut {
     this.image = image;
     this.name = name;
     this.env = env;
+    this.baseName = name;
+    this.starts = 0;
     this.lines = [];
     this.exit = null;
     this.child = null;
   }
 
   start() {
+    this.starts++;
+    // A container removed with --rm may still hold the name for a moment.
+    this.name = this.starts === 1 ? this.baseName : `${this.baseName}-${this.starts}`;
+    this.exit = null;
     let cmd;
     let args;
     let env = { ...process.env, ...this.env };
@@ -57,6 +63,16 @@ export class Sut {
         resolve(this.exit);
       });
     });
+  }
+
+  // Stops the bot and starts it again with some environment variables
+  // changed, e.g. a setting only one scenario needs. Its log carries on in
+  // `lines`, after a marker naming the changed variables (not their values).
+  async restart(envOverrides) {
+    await this.stop();
+    this.env = { ...this.env, ...envOverrides };
+    this.lines.push(`----- restarted with ${Object.keys(envOverrides).join(', ')} changed -----`);
+    this.start();
   }
 
   // Rejects as soon as the process dies, so waits elsewhere fail fast.
