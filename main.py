@@ -1,5 +1,6 @@
 import discord
 import discord.ext
+import aiohttp
 import asyncio
 import random
 import datetime
@@ -9,7 +10,7 @@ import time
 import logging
 import sys
 
-from jfapi import JFAPI
+from jfapi import JFAPI, JellyfinResponseError
 from jellychord.config import ConfigError, load_config
 
 '''
@@ -80,7 +81,15 @@ currentPlayers = {}
 # so commands that would start a player wait on this first (waitUntilLeft).
 leaving = {}
 
-bot = discord.Bot()
+class JellychordBot(discord.Bot):
+    async def close(self):
+        # bot.run() calls close() on shutdown, also after Ctrl+C or SIGTERM.
+        try:
+            await super().close()
+        finally:
+            await JF_APICLIENT.close()
+
+bot = JellychordBot()
 
 '''
 Helper Functions
@@ -96,6 +105,18 @@ async def searchHelper(term: str, limit: int = LIMIT, searchType:str = None):
     res = await JF_APICLIENT.search(term, limit, searchType)
     return res
 
+# What a Jellyfin request raises when the server can't be reached, times out,
+# answers with an HTTP error (JFAPI calls raise_for_status) or with a body
+# that isn't the expected JSON.
+JELLYFIN_ERRORS = (aiohttp.ClientError, TimeoutError, JellyfinResponseError)
+JELLYFIN_ERROR_MESSAGE = "Couldn't reach the Jellyfin server. Please try again later."
+
+async def reportJellyfinError(ctx: discord.ApplicationContext):
+    # Call from an except block. Commands defer first, so without a reply the
+    # user would be left looking at "thinking..." until Discord gives up.
+    log.exception('Jellyfin request failed')
+    await ctx.respond(JELLYFIN_ERROR_MESSAGE)
+
 def getItemLength(item: dict) -> int:
     """Length in seconds, 0 if Jellyfin doesn't know it."""
     ticks = item.get('RunTimeTicks')
@@ -109,10 +130,17 @@ def getItemEntry(item: dict) -> dict:
         "Length": getItemLength(item)
     }
 
-async def playHelperGeneric(item: dict, ctx: discord.ApplicationContext, position: str):
+async def playHelperGeneric(item: dict, ctx: discord.ApplicationContext, position: str,
+                            announcement: str | None = None):
+    # announcement ("Playing X") is sent once the tracks are known, so a failed
+    # or empty album lookup doesn't follow it with an error.
     entries = []
     if item["Type"] == "MusicAlbum":
-        tracks = await JF_APICLIENT.getAlbumTracks(item['Id'])
+        try:
+            tracks = await JF_APICLIENT.getAlbumTracks(item['Id'])
+        except JELLYFIN_ERRORS:
+            await reportJellyfinError(ctx)
+            return
         entries = [getItemEntry(i) for i in tracks]
     else:
         entries = [getItemEntry(item)]
@@ -122,6 +150,9 @@ async def playHelperGeneric(item: dict, ctx: discord.ApplicationContext, positio
         log.warning('Album %s has no tracks, nothing queued', item['Id'])
         await ctx.respond('That album has no tracks to play')
         return
+
+    if announcement:
+        await ctx.respond(announcement)
 
     fairplay = config.get('fairplay')
 
@@ -800,7 +831,11 @@ async def search(ctx: discord.ApplicationContext,
                  when: discord.Option(str, choices=['now', 'next', 'last'], required=False) = 'last'):
     
     await ctx.defer(invisible=True)
-    res = await searchHelper(term, searchType=searchtype)
+    try:
+        res = await searchHelper(term, searchType=searchtype)
+    except JELLYFIN_ERRORS:
+        await reportJellyfinError(ctx)
+        return
     if not res:
         await ctx.respond("No items match your query.")
     elif not ctx.author.voice and not ctx.voice_client:
@@ -818,7 +853,11 @@ async def play(ctx: discord.ApplicationContext,
                when: discord.Option(str, choices=['now', 'next', 'last'], required=False) = 'last'):
     
     await ctx.defer(invisible=True)
-    res = await searchHelper(term, limit=1, searchType=searchtype)
+    try:
+        res = await searchHelper(term, limit=1, searchType=searchtype)
+    except JELLYFIN_ERRORS:
+        await reportJellyfinError(ctx)
+        return
     # A voice client that is about to go away doesn't count (see stopPlayback).
     await waitUntilLeft(ctx.guild_id)
 
@@ -827,8 +866,8 @@ async def play(ctx: discord.ApplicationContext,
     elif not ctx.author.voice and not ctx.voice_client:
         await ctx.respond('You are not in any voice channel')
     else:
-        await ctx.respond(f'Playing {getTrackString(res[0], showType=True)}')
-        await playHelperGeneric(res[0], ctx, when)
+        await playHelperGeneric(res[0], ctx, when,
+                                announcement=f'Playing {getTrackString(res[0], showType=True)}')
 
 @cmdgrp.command()
 async def skip(ctx: discord.ApplicationContext):
@@ -1038,15 +1077,19 @@ if DEBUG:
                     when: discord.Option(str, choices=['now', 'next', 'last'], required=False) = 'last'):
         
         await ctx.defer(invisible=True)
-        res = await JF_APICLIENT.getItemsByIds([id])
+        try:
+            res = await JF_APICLIENT.getItemsByIds([id])
+        except JELLYFIN_ERRORS:
+            await reportJellyfinError(ctx)
+            return
 
         if not res:
             await ctx.respond('No items match your query')
         elif not ctx.author.voice:
             await ctx.respond('You are not in any voice channel')
         else:
-            await ctx.respond(f'Playing {getTrackString(res[0], showType=True)}')
-            await playHelperGeneric(res[0], ctx, when)
+            await playHelperGeneric(res[0], ctx, when,
+                                    announcement=f'Playing {getTrackString(res[0], showType=True)}')
     
     @dbgcmd.command()
     async def printplaylist(ctx: discord.ApplicationContext):

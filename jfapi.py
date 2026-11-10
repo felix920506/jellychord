@@ -1,8 +1,9 @@
 import aiohttp
-import asyncio
-import json
-import yaml
 import urllib.parse
+
+class JellyfinResponseError(Exception):
+    """Jellyfin answered with a success status but the body isn't the
+    expected JSON (invalid JSON, or no list under 'Items')."""
 
 class JFAPI():
     def __init__(self, server: str, apikey: str) -> None:
@@ -14,25 +15,41 @@ class JFAPI():
         return f'{self.__server}/{endpoint.strip('/')}'
 
     async def __aenter__(self):
-        self._session = aiohttp.ClientSession()
-    
-    async def __aexit__(self):
-        await self._session.close()
-    
-    def __del__(self):
-        try:
-            asyncio.run(self._session.delete())
-        except:
-            pass
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        await self.close()
+
+    # The session is created lazily on the event loop, so it has to be closed
+    # there too: call close() (or use `async with`) before the loop ends.
+    async def close(self):
+        session, self._session = self._session, None
+        if session is not None:
+            await session.close()
 
     async def checkSession(self):
         if not self._session:
             self._session = aiohttp.ClientSession()
 
-    # https://api.jellyfin.org/#tag/Search/operation/GetSearchHints
-    # GET /Search/Hints
-    async def search(self, term: str, limit: int = None, types:list[str] = []) -> list:
+    # Raises aiohttp.ClientResponseError if Jellyfin answers with an HTTP error
+    # (or a non-JSON content type), JellyfinResponseError if a success body
+    # isn't JSON with an 'Items' list.
+    async def __getItems(self, params: dict) -> list:
         await self.checkSession()
+        async with self._session.get(self.__getEndpointUrl('/Items'), params=params) as res:
+            res.raise_for_status()
+            try:
+                body = await res.json()
+            except ValueError as e:  # json.JSONDecodeError
+                raise JellyfinResponseError(f'GET /Items returned invalid JSON: {e}') from e
+        items = body.get('Items') if isinstance(body, dict) else None
+        if not isinstance(items, list):
+            raise JellyfinResponseError("GET /Items response has no 'Items' list")
+        return items
+
+    # https://api.jellyfin.org/#tag/Items/operation/GetItems
+    # GET /Items
+    async def search(self, term: str, limit: int = None, types: list[str] | None = None) -> list:
         params = {
             'ApiKey': self.__apikey,
             'searchTerm': term,
@@ -42,12 +59,7 @@ class JFAPI():
             params['limit'] = limit
         if types:
             params['includeItemTypes'] = ','.join(types)
-
-        async with self._session.get(
-            self.__getEndpointUrl('/Items'),
-            params=params
-        ) as res:
-            return (await res.json())["Items"]
+        return await self.__getItems(params)
 
     # Gets HLS stream for audio soundtrack with format Opus 16bit 48khz in fMP4 containers
     # Returns URL for use with external player (ffmpeg)
@@ -70,23 +82,19 @@ class JFAPI():
     # Gets items by IDs
     # GET /Items
     async def getItemsByIds(self, ids: list[str]):
-        await self.checkSession()
-        endpoint = self.__getEndpointUrl('/Items')
         params = {
             'ApiKey': self.__apikey,
             'ids': ','.join(ids)
         }
-        async with self._session.get(endpoint, params=params) as res:
-            return (await res.json())['Items']
-    
+        return await self.__getItems(params)
+
+    # Gets an album's tracks in disc and track order
+    # GET /Items
     async def getAlbumTracks(self, albumId: str):
-        await self.checkSession()
-        endpoint = self.__getEndpointUrl('/Items')
         params = {
             'ApiKey': self.__apikey,
             'parentId': albumId,
             'sortBy': 'ParentIndexNumber,IndexNumber'
         }
-        async with self._session.get(endpoint, params=params) as res:
-            return (await res.json())['Items']
+        return await self.__getItems(params)
 

@@ -84,6 +84,9 @@ def make_discord_stub():
         def run(self, token):
             self.run_token = token
 
+        async def close(self):
+            self.closed = True
+
     class FakeFFmpegOpusAudio:
         def __init__(self, url, **kwargs):
             self.url = url
@@ -115,7 +118,7 @@ def make_discord_stub():
     return discord, discord_ext
 
 
-def import_main_with_stubs():
+def import_main_with_stubs(env_overrides=None):
     discord, discord_ext = make_discord_stub()
     env = {
         "JELLYCHORD_USE_CONF_FILE": "0",
@@ -127,6 +130,7 @@ def import_main_with_stubs():
         "JELLYCHORD_ENABLE_DEBUG": "0",
         "JELLYCHORD_ENABLE_FAIRPLAY": "0",
         "JELLYCHORD_LOG_LEVEL": "WARNING",
+        **(env_overrides or {}),
     }
 
     sys.modules.pop("main", None)
