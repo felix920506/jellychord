@@ -1,47 +1,26 @@
 import discord
 import discord.ext
 import asyncio
-import yaml
 import random
 import datetime
 import os
 import math
 import time
 import logging
+import sys
 
 from jfapi import JFAPI
-
-config = {}
+from jellychord.config import ConfigError, load_config
 
 '''
 Load Settings
 '''
-if not os.getenv('JELLYCHORD_USE_CONF_FILE') == '0':
-    with open('config.yml', 'r', encoding='utf8') as conffile:
-        config = yaml.load(conffile, yaml.loader.Loader)
-
-else:
-    config = {
-        'discord-token': os.getenv('JELLYCHORD_DC_TOKEN'),
-        'jf-server': os.getenv('JELLYCHORD_JF_SERVER'),
-        'jf-apikey': os.getenv('JELLYCHORD_JF_APIKEY'),
-        'command-group': os.getenv('JELLYCHORD_COMMAND_GROUP'),
-        'search-limit': os.getenv('JELLYCHORD_SEARCH_LIMIT'),
-        'enable-debug': os.getenv('JELLYCHORD_ENABLE_DEBUG') == '1',
-        'fairplay': os.getenv('JELLYCHORD_ENABLE_FAIRPLAY') == '1',
-        'log-level': os.getenv('JELLYCHORD_LOG_LEVEL'),
-    }
-
-    if not config['search-limit']:
-        config['search-limit'] = 25
-    else:
-        config['search-limit'] = int(config['search-limit'])
-
-    if not config['command-group']: 
-        config['command-group'] = 'jellychord'
-
-    if config['enable-debug']:
-        config['debug-server'] = int(os.getenv('JELLYCHORD_DEBUG_SERVER'))
+try:
+    config = load_config()
+except ConfigError as e:
+    # Logging isn't set up yet (the log level is a setting); exit non-zero
+    # with the message on stderr.
+    sys.exit(f'jellychord: {e}')
 
 '''
 Logging
@@ -117,12 +96,17 @@ async def searchHelper(term: str, limit: int = LIMIT, searchType:str = None):
     res = await JF_APICLIENT.search(term, limit, searchType)
     return res
 
+def getItemLength(item: dict) -> int:
+    """Length in seconds, 0 if Jellyfin doesn't know it."""
+    ticks = item.get('RunTimeTicks')
+    return max(0, ticks // 10000000) if isinstance(ticks, int) else 0
+
 def getItemEntry(item: dict) -> dict:
     return {
-        "Artists": item["Artists"],
+        "Artists": item.get("Artists") or [],
         "Name": item["Name"],
         "Id": item['Id'],
-        "Length": item['RunTimeTicks'] // 10000000
+        "Length": getItemLength(item)
     }
 
 async def playHelperGeneric(item: dict, ctx: discord.ApplicationContext, position: str):
@@ -584,18 +568,20 @@ def getTrackString(item: dict, artistLimit: int = 1, showType: bool = False, sho
     else:
         res = 'Track: '
 
-    if len(item["Artists"]) > artistLimit:
+    artists = item.get("Artists") or []
+    if len(artists) > artistLimit:
         res += 'Various Artists'
-    elif item["Artists"]:
-        res += ','.join(item["Artists"])
+    elif artists:
+        res += ','.join(artists)
     
-    if item["Artists"]:
+    if artists:
         res += ' - '
     
     res += item["Name"]
 
-    if showSize and item["Type"] == "Audio":
-        secs = item['RunTimeTicks'] // 10000000
+    # An unknown length (0) is left out rather than shown as 00:00.
+    secs = getItemLength(item)
+    if showSize and item["Type"] == "Audio" and secs:
         res += f' ({formatTimeSecs(secs, secs >= 3600)})'
     return res
 
@@ -682,8 +668,8 @@ class searchDropdown(discord.ui.Select):
         # message doesn't cancel its timeout, so on_timeout would otherwise
         # replace "Playing X" with "Selection timed out." later.
         self.view.stop()
-        await interaction.response.edit_message(content=f'Playing {getTrackString(self.items[int(self._selected_values[0])], showType=True)}',view=None)
-        await playHelperGeneric(self.items[int(self._selected_values[0])], self.ctx, self.when)
+        await interaction.response.edit_message(content=f'Playing {getTrackString(self.items[int(self.values[0])], showType=True)}',view=None)
+        await playHelperGeneric(self.items[int(self.values[0])], self.ctx, self.when)
 
 class ownerOnlyView(discord.ui.View):
     # For views on public replies: only the user who ran the command may use
@@ -731,7 +717,7 @@ class listDropdown(discord.ui.Select):
         self.min_values = 1
 
     async def callback(self, interaction: discord.Interaction):
-        await self.view.showPage(interaction, int(self._selected_values[0])-1)
+        await self.view.showPage(interaction, int(self.values[0])-1)
 
     def update_options(self, pages: int, page: int):
         self.options = [discord.SelectOption(label=str(i+1), value=str(i+1), default=i == page)
@@ -859,8 +845,10 @@ async def nowplaying(ctx: discord.ApplicationContext):
         td = track['playtime-offset']
         if not playing[ctx.guild_id]['paused']:
             td += datetime.datetime.now() - track['starttime']
-        length = track["Length"]
-        await ctx.respond(f'Currently Playing: {getTrackString(track)} {formatTimeSecs(td.seconds, length >= 3600)}/{formatTimeSecs(length)}')
+        length = track.get("Length") or 0
+        # Length 0 means Jellyfin didn't report one: show the elapsed time only.
+        total = formatTimeSecs(length) if length else '--:--'
+        await ctx.respond(f'Currently Playing: {getTrackString(track)} {formatTimeSecs(td.seconds, length >= 3600)}/{total}')
     else:
         await ctx.respond('Not Currently Playing')
 

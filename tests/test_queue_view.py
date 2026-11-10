@@ -79,6 +79,18 @@ class QueueViewTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Track 2", lines[3])
         self.assertEqual(lines[-1], "Page: 1/1")
 
+    async def test_queue_lists_tracks_missing_artists_and_length(self):
+        raw = [
+            {"Type": "Audio", "Name": "Bare", "Id": "bare"},
+            {"Type": "Audio", "Name": "Live", "Id": "live", "Artists": None, "RunTimeTicks": None},
+        ]
+        self.main.queues[1] = [self.main.getItemEntry(item) for item in raw]
+        ctx = make_ctx()
+
+        await self.main.queue(ctx)
+
+        self.assertEqual(ctx.respond.await_args.args[0], "Tracks in playlist:\n1. Bare\n2. Live\nPage: 1/1")
+
     async def test_queue_number_matches_remove_index(self):
         self.set_queue(3)
         ctx = make_ctx()
@@ -175,13 +187,13 @@ class QueueViewTests(unittest.IsolatedAsyncioTestCase):
 
         # Selecting page 25 recentres the window so later pages appear.
         interaction = make_interaction()
-        view.selection._selected_values = ["25"]
+        view.selection.refresh_state({"values": ["25"]})
         await view.selection.callback(interaction)
         self.assertEqual(view.page, 24)
         self.assertEqual(self.option_labels(view), [str(i) for i in range(13, 38)])
         self.assertEqual(self.selected_labels(view), ["25"])
 
-        view.selection._selected_values = ["37"]
+        view.selection.refresh_state({"values": ["37"]})
         await view.selection.callback(interaction)
         content = interaction.response.edit_message.await_args.kwargs["content"]
         self.assertTrue(content.split("\n")[1].startswith(f"{36 * size + 1}. "))
@@ -202,7 +214,7 @@ class QueueViewTests(unittest.IsolatedAsyncioTestCase):
     async def test_next_after_queue_shrinks_clamps_to_last_page(self):
         size = self.main.PLAYLIST_PAGESIZE
         view = await self.open_queue(6 * size)
-        view.selection._selected_values = ["6"]
+        view.selection.refresh_state({"values": ["6"]})
         await view.selection.callback(make_interaction())
         self.assertEqual(view.page, 5)
         del self.main.queues[1][2 * size:]
@@ -221,7 +233,7 @@ class QueueViewTests(unittest.IsolatedAsyncioTestCase):
     async def test_prev_after_queue_shrinks_clamps_to_last_page(self):
         size = self.main.PLAYLIST_PAGESIZE
         view = await self.open_queue(6 * size)
-        view.selection._selected_values = ["6"]
+        view.selection.refresh_state({"values": ["6"]})
         await view.selection.callback(make_interaction())
         del self.main.queues[1][2 * size:]
 

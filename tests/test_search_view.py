@@ -48,7 +48,7 @@ class SearchViewTests(unittest.IsolatedAsyncioTestCase):
         return ctx, view, view.items[0]
 
     async def select(self, dropdown, index, interaction=None):
-        dropdown._selected_values = [str(index)]
+        dropdown.refresh_state({"values": [str(index)]})
         await dropdown.callback(interaction or make_interaction())
 
     async def test_selection_stops_view_and_plays_selected_item(self):
@@ -105,7 +105,7 @@ class SearchViewTests(unittest.IsolatedAsyncioTestCase):
         other = make_interaction(user_id=200)
 
         with mock.patch.object(self.main, "playHelperGeneric", mock.AsyncMock()) as play:
-            dropdown._selected_values = ["0"]
+            dropdown.refresh_state({"values": ["0"]})
             await dispatch(view, dropdown, other)
 
             other.response.send_message.assert_awaited_once()
@@ -115,12 +115,34 @@ class SearchViewTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(view.stopped)
 
             owner = make_interaction(user_id=ctx.author.id)
-            dropdown._selected_values = ["1"]
+            dropdown.refresh_state({"values": ["1"]})
             await dispatch(view, dropdown, owner)
 
         self.assertTrue(view.stopped)
         self.assertIn("Song B", owner.response.edit_message.await_args.kwargs["content"])
         play.assert_awaited_once_with(tracks[1], ctx, "last")
+
+    async def test_labels_for_items_missing_artists_or_length(self):
+        bare = {"Type": "Audio", "Name": "Bare", "Id": "bare"}
+        unknown_length = {"Type": "Audio", "Artists": None, "Name": "Live", "Id": "live", "RunTimeTicks": None}
+        album = {"Type": "MusicAlbum", "Name": "Album", "Id": "album"}
+        _, _, dropdown = await self.open_search([bare, unknown_length, album])
+
+        self.assertEqual(
+            [option["label"] for option in dropdown.options],
+            ["Track: Bare", "Track: Live", "Album: Album"],
+        )
+
+    async def test_picking_an_item_missing_artists_and_length_queues_it(self):
+        bare = {"Type": "Audio", "Name": "Bare", "Id": "bare"}
+        _, _, dropdown = await self.open_search([bare])
+        interaction = make_interaction()
+
+        with mock.patch.object(self.main, "playHelperGeneric", mock.AsyncMock()) as play:
+            await self.select(dropdown, 0, interaction)
+
+        self.assertEqual(interaction.response.edit_message.await_args.kwargs["content"], "Playing Track: Bare")
+        play.assert_awaited_once()
 
     async def test_timeout_without_selection_shows_timed_out(self):
         # py-cord calls view.on_timeout() with no arguments.
@@ -130,6 +152,27 @@ class SearchViewTests(unittest.IsolatedAsyncioTestCase):
 
         view.message.edit.assert_awaited_once_with("Selection timed out.", view=None)
         self.assertTrue(dropdown.disabled)
+
+
+class PycordSelectContractTests(unittest.TestCase):
+    """The stub's Select mirrors py-cord: a string select's choice is read from
+    the public values property once py-cord has refreshed it from the
+    interaction."""
+
+    def test_values_returns_the_selected_strings(self):
+        try:
+            import discord
+        except ImportError:
+            self.skipTest("py-cord is not installed")
+        select = discord.ui.Select(options=[discord.SelectOption(label="a", value="0"),
+                                            discord.SelectOption(label="b", value="1")])
+        self.assertIsNone(select.values)
+
+        interaction = mock.Mock(spec=discord.Interaction)
+        interaction.data = {"values": ["1"]}
+        select.refresh_state(interaction)
+
+        self.assertEqual(select.values, ["1"])
 
 
 if __name__ == "__main__":
