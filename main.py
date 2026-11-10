@@ -70,7 +70,8 @@ SELECT_MAX_OPTIONS = 25 # Discord's limit on options in a select menu
 # hands off to advanceTrack() on the loop (see onTrackEnd).
 queues = {}
 playing = {}
-# guild id -> True if a skip was requested while the next track was loading
+# guild id -> asyncio.Event, set if a skip was requested while the next track
+# was loading
 loading = {}
 playerLocks = {}
 # guild id -> time.monotonic() deadline until which a bot leave event counts as
@@ -181,7 +182,7 @@ async def playTrack(guild: discord.Guild):
 def skipCurrentTrack(guild: discord.Guild):
     """Skip the playing track, or the next one if it is still loading."""
     if guild.id in loading:
-        loading[guild.id] = True
+        loading[guild.id].set()
     if guild.voice_client:
         guild.voice_client.stop()
 
@@ -236,16 +237,62 @@ def popNextEntry(guildId: int) -> dict | None:
     playing[guildId] = entry
     return entry
 
+# How long ffmpeg waits on a stalled stream read (or connect) before giving up
+# with an error, in seconds. Jellyfin can take a few seconds to transcode the
+# first segment, so leave plenty of room. Without it a stalled stream blocks
+# ffmpeg forever, both while loading and mid-track in py-cord's player thread.
+STREAM_IO_TIMEOUT = 30
+# How long advanceTrack waits for a track to load before dropping it. A
+# backstop for loads ffmpeg's own timeout doesn't end; longer than it, so a
+# load that ffmpeg would still finish isn't cut short.
+TRACK_LOAD_TIMEOUT = 45
+
 def loadAudio(url: str) -> discord.FFmpegOpusAudio:
     """Start ffmpeg and wait for the first packet. Blocking, so run it in a
     thread; it only touches the new audio source, never shared state."""
-    audio = discord.FFmpegOpusAudio(url, codec='copy')
+    audio = discord.FFmpegOpusAudio(
+        url,
+        codec='copy',
+        # ffmpeg's -rw_timeout is in microseconds
+        before_options=f'-rw_timeout {STREAM_IO_TIMEOUT * 1_000_000}',
+    )
     try:
         audio.read()
     except BaseException:
         audio.cleanup()
         raise
     return audio
+
+def cleanupAbandonedLoad(load: asyncio.Future):
+    """Done-callback for a load nobody waits for any more: stop the ffmpeg
+    process it started. Runs on the event loop."""
+    if load.cancelled() or load.exception() is not None:
+        return
+    try:
+        load.result().cleanup()
+    except Exception:
+        log.exception('Failed to clean up an abandoned track load')
+
+async def waitForLoad(url: str, skipRequested: asyncio.Event) -> discord.FFmpegOpusAudio | None:
+    """Run loadAudio in a worker thread. Returns its audio source, or None if a
+    skip was requested first. Raises TimeoutError after TRACK_LOAD_TIMEOUT.
+    The thread can't be interrupted, so when this stops waiting for it (skip,
+    timeout or cancellation), the source it eventually returns is cleaned up."""
+    load = asyncio.get_running_loop().run_in_executor(None, loadAudio, url)
+    skipWait = asyncio.ensure_future(skipRequested.wait())
+    try:
+        await asyncio.wait({load, skipWait}, timeout=TRACK_LOAD_TIMEOUT,
+                           return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        skipWait.cancel()
+        if not load.done():
+            load.add_done_callback(cleanupAbandonedLoad)
+    if load.done():
+        # if a skip came in too, the caller drops (and cleans up) the source
+        return load.result()
+    if skipRequested.is_set():
+        return None
+    raise TimeoutError(f'Track did not start within {TRACK_LOAD_TIMEOUT} seconds')
 
 def onTrackEnd(loop: asyncio.AbstractEventLoop, guild: discord.Guild, error: Exception | None):
     # Runs on the voice player thread: hand off to the event loop and return.
@@ -291,16 +338,20 @@ async def _advanceTrack(guild: discord.Guild):
 
         log.info('Playing %s (%s) in guild %s', entry['Name'], entry['Id'], guild.id)
         # Commands keep running while ffmpeg starts. A skip, /stop or
-        # when=now in that window sets loading[guild.id], so this track is dropped.
-        loading[guild.id] = False
+        # when=now in that window sets loading[guild.id], so this track is
+        # dropped right away, even if its load is stuck.
+        skipRequested = loading[guild.id] = asyncio.Event()
         loadError = None
+        audio = None
         try:
             url = JF_APICLIENT.getAudioHls(entry["Id"], vc.channel.bitrate)
-            audio = await asyncio.to_thread(loadAudio, url)
+            audio = await waitForLoad(url, skipRequested)
         except Exception as exc:
+            # includes TimeoutError: a stalled load counts as a failure
             loadError = exc
         finally:
-            skipped = loading.pop(guild.id)
+            loading.pop(guild.id)
+        skipped = skipRequested.is_set()
 
         if loadError is not None:
             if skipped:
@@ -312,7 +363,8 @@ async def _advanceTrack(guild: discord.Guild):
                           guild.id, failures, MAX_START_ATTEMPTS, exc_info=loadError)
             continue
         if skipped or guild.voice_client is not vc or not vc.is_connected():
-            audio.cleanup()
+            if audio is not None:
+                audio.cleanup()
             continue
 
         # don't count loading time as played time
