@@ -50,8 +50,15 @@ class FakeVoiceClient:
         self.play_calls = []
         self.failed_plays = []
         self.play_failures = play_failures
+        self.busy = False
         self.stopped = False
         self.disconnect_requested = False
+
+    def is_playing(self):
+        return self.busy
+
+    def is_paused(self):
+        return False
 
     def play(self, audio, after):
         if self.play_failures:
@@ -335,6 +342,36 @@ class PlayNextTrackFailureTests(unittest.TestCase):
         self.assertEqual(queue_ids(self.main.queues[42]), ["untouched"])
         self.assertNotIn(42, self.main.playing)
         self.assertEqual(self.scheduled, [("disconnect-coroutine", voice_client.loop)])
+
+    def test_fairplay_queue_is_still_listable_after_giving_up(self):
+        self.main.config["fairplay"] = True
+        attempts = self.main.MAX_START_ATTEMPTS
+        voice_client = FakeVoiceClient(play_failures=attempts)
+        guild = types.SimpleNamespace(id=42, voice_client=voice_client)
+        self.main.queues[42] = {
+            100: [queue_entry(f"user-100-{i}") for i in range(attempts)],
+            200: [queue_entry("user-200-a")],
+        }
+
+        with self.assertLogs("jellychord", "ERROR"):
+            self.main.playNextTrack(guild)
+
+        self.assertNotIn(42, self.main.playing)
+        # fairplay alternates users between attempts: 100-0, 200-a, 100-1
+        self.assertEqual(queue_ids(self.main.getFlattenedPlayQueue(42)), ["user-100-2"])
+
+    def test_no_retry_when_another_player_is_active(self):
+        voice_client = FakeVoiceClient(play_failures=1)
+        voice_client.busy = True
+        guild = types.SimpleNamespace(id=42, voice_client=voice_client)
+        self.main.queues[42] = [queue_entry("lost-race"), queue_entry("kept")]
+
+        with self.assertLogs("jellychord", "ERROR"):
+            self.main.playNextTrack(guild)
+
+        self.assertEqual(len(voice_client.failed_plays), 1)
+        self.assertEqual(queue_ids(self.main.queues[42]), ["kept"])
+        self.assertEqual(self.scheduled, [])
 
     def test_failure_when_queue_runs_out_disconnects(self):
         voice_client = FakeVoiceClient(play_failures=1)

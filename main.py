@@ -45,9 +45,9 @@ else:
 '''
 Logging
 '''
-# The E2E hook's log level is honoured as a fallback: once logging is
-# configured here, its own basicConfig() call is a no-op.
-LOG_LEVEL = str(config.get('log-level') or os.getenv('JELLYCHORD_E2E_LOG_LEVEL') or 'INFO').upper()
+# The E2E hook's log level takes precedence: once logging is configured
+# here, the hook's own basicConfig() call is a no-op.
+LOG_LEVEL = str(os.getenv('JELLYCHORD_E2E_LOG_LEVEL') or config.get('log-level') or 'INFO').upper()
 logging.basicConfig(
     level=logging.getLevelNamesMapping().get(LOG_LEVEL, logging.INFO),
     format='%(asctime)s %(levelname)s %(name)s: %(message)s',
@@ -182,6 +182,11 @@ def playNextTrack(guild, error=None):
         except Exception:
             log.exception('Failed to start the next track in guild %s (attempt %d/%d)',
                           guild.id, attempt, MAX_START_ATTEMPTS)
+            if vc.is_playing() or vc.is_paused():
+                # Another start won a race (vc.play raised "Already playing
+                # audio"). That player's after= callback continues the chain;
+                # retrying would only drop more tracks.
+                return
         vc = guild.voice_client
     else:
         log.error('Giving up on playback in guild %s after %d failed attempts',
@@ -299,7 +304,8 @@ def getFlattenedPlayQueue(guildId: int) -> list[dict]:
     if not config.get('fairplay'):
         return queues[guildId]
     else:
-        nextTrackUserIdx = playing[guildId].get('nextTrackUserIdx') % len(queues[guildId])
+        # nothing may be playing, e.g. after playback gave up with tracks still queued
+        nextTrackUserIdx = playing.get(guildId, {}).get('nextTrackUserIdx', 0) % len(queues[guildId])
         userIds = list(queues[guildId].keys())
         orderedUserIds = userIds[nextTrackUserIdx:]+userIds[:nextTrackUserIdx]
         orderedTrackLists = [queues[guildId][uid] for uid in orderedUserIds]
