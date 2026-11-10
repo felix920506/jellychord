@@ -89,6 +89,13 @@ voiceEpochs = {}
 # voice connection, and how often it checks.
 VOICE_RECOVERY_TIMEOUT = 60
 VOICE_POLL_INTERVAL = 0.25
+# How long advanceTrack waits for py-cord to recover a dropped voice connection
+# before giving up and leaving voice (queued tracks are kept for /start).
+VOICE_OUTAGE_TIMEOUT = 120
+# guild id -> token of the last player advanceTrack started. Its after=
+# callback passes the token back, so advanceTrack can tell that this player's
+# thread has exited even if py-cord still reports it as playing.
+currentPlayers = {}
 
 bot = discord.Bot()
 
@@ -300,35 +307,57 @@ async def waitForLoad(url: str, skipRequested: asyncio.Event) -> discord.FFmpegO
             # cancelled before it could resume: done-callbacks still run then.
             load.add_done_callback(cleanupAbandonedLoad)
 
-def onTrackEnd(loop: asyncio.AbstractEventLoop, guild: discord.Guild, error: Exception | None):
+def onTrackEnd(loop: asyncio.AbstractEventLoop, guild: discord.Guild, error: Exception | None, player: object = None):
     # Runs on the voice player thread: hand off to the event loop and return.
-    asyncio.run_coroutine_threadsafe(advanceTrack(guild, error), loop)
+    asyncio.run_coroutine_threadsafe(advanceTrack(guild, error, player), loop)
 
 # How many tracks advanceTrack will try to start, one after another, before
 # giving up and leaving the voice channel.
 MAX_START_ATTEMPTS = 3
 
-async def advanceTrack(guild: discord.Guild, error: Exception | None = None):
-    """Play the next queued track, or leave the voice channel if there is none."""
+async def advanceTrack(guild: discord.Guild, error: Exception | None = None, endedPlayer: object = None):
+    """Play the next queued track, or leave the voice channel if there is none.
+    endedPlayer is the token of the player whose after= callback triggered this."""
     if error is not None:
         log.error('Playback error in guild %s', guild.id, exc_info=error)
     lock = playerLocks.setdefault(guild.id, asyncio.Lock())
     try:
         async with lock:
-            await _advanceTrack(guild)
+            await _advanceTrack(guild, endedPlayer)
     except Exception:
         # Nothing awaits this when it comes from onTrackEnd, so log here.
         log.exception('Could not start the next track in guild %s', guild.id)
 
-async def _advanceTrack(guild: discord.Guild):
+async def _advanceTrack(guild: discord.Guild, endedPlayer: object = None):
     failures = 0
+    startPaused = False
     while True:
         vc = guild.voice_client
-        if vc is None or not vc.is_connected():
-            # Disconnected (kicked, network drop...) before we got here.
+        if vc is not None and not vc.is_connected():
+            # py-cord keeps the voice client and reconnects in the background.
+            # Nothing else would restart playback once it's back, so wait here.
+            if await waitForVoiceRecovery(guild, vc):
+                # The now-playing entry holds the latest /pause or /resume
+                # (made during the wait, or carried over from a failed start),
+                # so it decides whether the next track starts paused.
+                startPaused = playing.get(guild.id, {}).get('paused', False)
+                continue  # recovered, or the voice client changed: look again
+            return  # gave up and left voice
+        if vc is None:
+            # Kicked, or py-cord gave up on the connection, before we got here.
             log.info('No voice connection in guild %s, stopping playback', guild.id)
             playing.pop(guild.id, None)
             return
+        if endedPlayer is not None and currentPlayers.get(guild.id) is endedPlayer:
+            # The player that called after= has exited, and no player was
+            # started since (only this coroutine starts them, under the lock).
+            currentPlayers.pop(guild.id)
+            if vc.is_playing() or vc.is_paused():
+                # py-cord's player gave up waiting for a dropped connection
+                # and returned without stop(), so it still reports itself as
+                # playing. Clear it, or nothing could ever play again.
+                log.warning('Voice player in guild %s stopped after losing its connection', guild.id)
+                vc.stop()
         if vc.is_playing() or vc.is_paused():
             # a track is already playing; only its end may advance the queue
             return
@@ -341,6 +370,11 @@ async def _advanceTrack(guild: discord.Guild):
         if entry is None:
             await stopPlayback(guild, vc)
             return
+        if startPaused:
+            entry['paused'] = True
+            # Carried over now; from here the entry's own state is what counts,
+            # so a /resume while it loads isn't undone if it fails.
+            startPaused = False
 
         log.info('Playing %s (%s) in guild %s', entry['Name'], entry['Id'], guild.id)
         # Commands keep running while ffmpeg starts. A skip, /stop or
@@ -358,6 +392,10 @@ async def _advanceTrack(guild: discord.Guild):
         finally:
             loading.pop(guild.id)
         skipped = skipRequested.is_set()
+        if skipped:
+            # Skipping a paused track drops its pause, so a later outage
+            # recovery doesn't carry it over to the next one.
+            entry['paused'] = False
 
         if loadError is not None:
             if skipped:
@@ -367,6 +405,9 @@ async def _advanceTrack(guild: discord.Guild):
                 failures += 1
                 log.error('Failed to start the next track in guild %s (attempt %d/%d)',
                           guild.id, failures, MAX_START_ATTEMPTS, exc_info=loadError)
+                # The track never started, so keep it paused (or not) as it is
+                # now on the next one. A skip drops it, like skipping a paused track.
+                startPaused = entry['paused']
             continue
         if skipped or guild.voice_client is not vc or not vc.is_connected():
             if audio is not None:
@@ -377,8 +418,9 @@ async def _advanceTrack(guild: discord.Guild):
         entry['playtime-offset'] = datetime.timedelta()
         entry['starttime'] = datetime.datetime.now()
         loop = asyncio.get_running_loop()
+        player = object()
         try:
-            vc.play(audio, after=lambda e: onTrackEnd(loop, guild, e))
+            vc.play(audio, after=lambda e: onTrackEnd(loop, guild, e, player))
         except Exception:
             # The player never took ownership of the source, so stop ffmpeg here.
             audio.cleanup()
@@ -391,18 +433,66 @@ async def _advanceTrack(guild: discord.Guild):
             failures += 1
             log.exception('Failed to start the next track in guild %s (attempt %d/%d)',
                           guild.id, failures, MAX_START_ATTEMPTS)
+            startPaused = entry['paused']
             continue
+        currentPlayers[guild.id] = player
         if entry['paused']:
             # /pause arrived while the track was loading
             vc.pause()
         return
 
+async def waitForVoiceRecovery(guild: discord.Guild, vc) -> bool:
+    """Wait for py-cord to recover vc's dropped connection. Returns True once
+    it is connected again or is no longer the guild's voice client (kicked,
+    py-cord gave up), so the caller can look again. If it doesn't recover
+    within VOICE_OUTAGE_TIMEOUT, or the queue is empty (/stop, /clear, or
+    nothing left to play), leaves voice and returns False."""
+    log.info('Voice connection in guild %s is down, waiting for it to recover', guild.id)
+    deadline = time.monotonic() + VOICE_OUTAGE_TIMEOUT
+    while guild.voice_client is vc and not vc.is_connected():
+        if not pruneEmptyQueues(guild.id):
+            # Nothing would play after recovery, so don't wait for it.
+            log.info('Nothing queued in guild %s while its voice connection is down, leaving voice', guild.id)
+            await stopPlayback(guild, vc)
+            return False
+        if time.monotonic() >= deadline:
+            log.warning('Voice connection in guild %s did not recover within %s seconds, leaving voice',
+                        guild.id, VOICE_OUTAGE_TIMEOUT)
+            await stopPlayback(guild, vc)
+            return False
+        await asyncio.sleep(VOICE_POLL_INTERVAL)
+    if guild.voice_client is vc:
+        log.info('Voice connection in guild %s recovered', guild.id)
+    return True
+
+def cancelVoiceReconnect(vc):
+    """Stop py-cord from reconnecting vc after we disconnect it.
+
+    In py-cord 2.8.1, VoiceClient.disconnect() doesn't cancel the connection's
+    background task (VoiceConnectionState._runner); only connect() and
+    soft_disconnect() do. If that task is asleep in its reconnect backoff, it
+    later rejoins voice with a voice client that has already been removed.
+    There is no public API for this, so this reaches into private attributes.
+    If py-cord renames them, it does nothing."""
+    try:
+        runner = getattr(getattr(vc, '_connection', None), '_runner', None)
+        if isinstance(runner, asyncio.Task) and runner is not asyncio.current_task():
+            runner.cancel()
+    except Exception:
+        log.debug('Could not cancel the voice reconnect task', exc_info=True)
+
 async def stopPlayback(guild: discord.Guild, vc):
     """Forget the current track and leave the voice channel. Tracks still
     queued are kept, so /start can pick them up."""
     playing.pop(guild.id, None)
+    currentPlayers.pop(guild.id, None)
     # tell onVoiceStateUpdate this leave is ours, so it keeps the queue
     expectedDisconnects[guild.id] = math.inf
+    # A listener still waiting on an earlier leave (e.g. py-cord's reconnect)
+    # must not take this leave for a kick: py-cord may not deliver a new leave
+    # event if the bot is already out of the channel.
+    bumpVoiceEpoch(guild.id)
+    cancelVoiceReconnect(vc)
     try:
         await vc.disconnect(force=True)
     except Exception:
@@ -416,6 +506,7 @@ async def stopPlayback(guild: discord.Guild, vc):
 def clearGuildState(guildId: int):
     queues.pop(guildId, None)
     playing.pop(guildId, None)
+    currentPlayers.pop(guildId, None)
 
 def bumpVoiceEpoch(guildId: int) -> int:
     voiceEpochs[guildId] = voiceEpochs.get(guildId, 0) + 1
