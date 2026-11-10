@@ -226,6 +226,73 @@ async function scenarioPauseResumeStop() {
   });
 }
 
+// Fairplay is read once at startup, so this scenario restarts the bot with
+// JELLYCHORD_ENABLE_FAIRPLAY=1 and restarts it with fairplay off again at the
+// end; every other scenario runs with fairplay off. The test has a single
+// Discord account (the listener), so the second user is a stand-in user ID
+// passed as e2e.as (see jellychord/e2e_control.py): the bot sees a different
+// requester, who shares the listener's voice state. It is a made-up ID, not a
+// real account.
+const STAND_IN_USER_ID = '1';
+
+async function restartSut(name, envOverrides) {
+  await resetPlayer();
+  const readyBefore = driver.readyCount;
+  await report.step('gateway', name, async () => {
+    await sut.restart(envOverrides);
+    await orDied(driver.waitForSutReady(90_000, readyBefore + 1));
+  });
+}
+
+async function scenarioFairplay() {
+  const delta = tone('Delta');
+  const [a, b, c] = TONES.filter((t) => t.album === TONE_ALBUM);
+  await restartSut('bot restarts with fairplay on', { JELLYCHORD_ENABLE_FAIRPLAY: '1' });
+  // An image built before e2e.as existed rejects it: a harness problem.
+  await report.step('harness', 'bot under test accepts commands from a stand-in second user', async () =>
+    expectReply(await driver.command('queue', { 'e2e.as': STAND_IN_USER_ID }), 'Empty Queue'),
+  );
+
+  // The listener's track plays while the rest is queued; it is long enough
+  // that nothing advances meanwhile.
+  const since = Date.now();
+  await driver.command('play', { term: delta.title, type: 'Soundtrack' });
+  await hear('fairplay setup', delta.freq, { since });
+  await report.step('bot-behavior', 'fairplay: two users queue tracks', async () => {
+    expectReply(await driver.command('play', { term: a.title, type: 'Soundtrack' }), a.title);
+    expectReply(await driver.command('play', { term: b.title, type: 'Soundtrack' }), b.title);
+    expectReply(await driver.command('play', { term: c.title, type: 'Soundtrack', 'e2e.as': STAND_IN_USER_ID }), c.title);
+  });
+  // Without fairplay the order would be a, b, c.
+  await report.step('bot-behavior', 'fairplay: queue alternates between the two users', async () =>
+    expectReply(
+      await driver.command('queue'),
+      new RegExp(`\\n1\\. [^\\n]*${a.title}\\n2\\. [^\\n]*${c.title}\\n3\\. [^\\n]*${b.title}\\n`),
+    ),
+  );
+  const skippedAt = Date.now();
+  await report.step('bot-behavior', 'fairplay: tracks play in rotation order through Discord', async () => {
+    expectReply(await driver.command('skip'), 'Skipping current track');
+    const expected = [a.freq, c.freq, b.freq];
+    await orDied(
+      driver.tracker.waitFor(
+        () => {
+          const heard = driver.tracker.sequence({ since: skippedAt });
+          // audio of the skipped track still in flight when the skip was sent
+          if (heard[0] === delta.freq) heard.shift();
+          return heard.join() === expected.join();
+        },
+        (a.seconds + b.seconds + c.seconds) * 1000 + 30_000,
+        `tones ${expected.join(' → ')}`,
+      ),
+    );
+  });
+  await report.step('bot-behavior', 'fairplay: bot leaves voice after both queues finish', () =>
+    orDied(driver.waitForSutVoice(null, 30_000)),
+  );
+  await restartSut('bot restarts with fairplay off again', { JELLYCHORD_ENABLE_FAIRPLAY: '0' });
+}
+
 async function checkCommandRegistration() {
   const { applicationId, commands } = await Driver.fetchGuildCommands(cfg.sutToken, cfg.guildId);
   report.meta.sutApplicationId = applicationId;
@@ -331,6 +398,7 @@ async function main() {
   await scenarioSkip();
   await scenarioPlayNow();
   await scenarioPauseResumeStop();
+  await scenarioFairplay();
 }
 
 async function discordStatus() {

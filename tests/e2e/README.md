@@ -33,6 +33,12 @@ daily on GitHub Actions and opens a GitHub issue when something breaks.
   is checked separately via the REST API. The one path left untested is
   Discord delivering an interaction to the bot and the bot answering it
   (`/jellychord ...` typed by a human, and the `/search` dropdown).
+* **Fairplay.** Fairplay is a startup setting, so the fairplay scenario
+  restarts the bot with `JELLYCHORD_ENABLE_FAIRPLAY=1` and turns it off again
+  afterwards; every other scenario runs without it. There is only one Discord
+  account, so the second user is a stand-in: a control message may carry
+  `e2e.as=<user-id>` to run the command as that (made-up) user ID, sharing
+  the listener's voice state.
 * **Listener in Node.** py-cord cannot receive audio over DAVE yet
   ([pycord#3139](https://github.com/Pycord-Development/pycord/issues/3139)),
   while `@discordjs/voice` can.
@@ -48,7 +54,7 @@ daily on GitHub Actions and opens a GitHub issue when something breaks.
   | `voice-encryption` | Joined, but the encrypted voice session (transport mode / DAVE) was not established. |
   | `audio-transport` | No audio packets from the bot arrived through Discord. |
   | `audio-content` | Packets arrived, but they could not be decrypted or decoded, or held the wrong track. |
-  | `bot-behavior` | A playback control (queue/skip/pause/resume/stop/when=now) misbehaved. |
+  | `bot-behavior` | A playback control (queue/skip/pause/resume/stop/when=now/fairplay rotation) misbehaved. |
 
 ## CI
 
@@ -133,7 +139,7 @@ export E2E_SUT_TOKEN=... E2E_DRIVER_TOKEN=... E2E_GUILD_ID=... \
        E2E_CONTROL_CHANNEL_ID=... E2E_VOICE_CHANNEL_ID=...
 export E2E_PYTHON="$(cd ../.. && poetry env info -p)/bin/python"
 E2E_SCENARIOS=smoke node run.mjs   # startup + one track (~2 min)
-node run.mjs                       # everything (~5 min)
+node run.mjs                       # everything (~6 min)
 ```
 
 Optional settings:

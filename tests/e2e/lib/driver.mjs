@@ -94,9 +94,17 @@ export class Driver {
     }
   }
 
-  waitForSutReady(timeoutMs) {
-    if (this.readyCount > 0) return Promise.resolve();
-    return withTimeout(new Promise((resolve) => this.readyWaiters.push(resolve)), timeoutMs, 'bot under test to announce ready');
+  // Resolves once the bot under test has announced ready `count` times in
+  // this run (it announces again after a restart, or a gateway reconnect).
+  waitForSutReady(timeoutMs, count = 1) {
+    return withTimeout(
+      new Promise((resolve) => {
+        const check = () => (this.readyCount >= count ? resolve() : this.readyWaiters.push(check));
+        check();
+      }),
+      timeoutMs,
+      'bot under test to announce ready',
+    );
   }
 
   // Sends a command to the SUT and resolves with its first reply text.

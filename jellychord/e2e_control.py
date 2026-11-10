@@ -17,6 +17,13 @@ Protocol (one message per request / reply)::
 ``<command>`` is a subcommand of the command group (``play``, ``skip`` ...) or
 one of the built-in hook commands: ``diag`` (voice connection diagnostics),
 ``versions`` (library versions) and ``ping``. On every ``on_ready`` the bot posts ``... e2e <run-nonce> - ready``.
+
+A subcommand request may also carry ``e2e.as=<user-id>``: the command then
+runs as if that user ID had sent it (``ctx.author.id``), with everything else
+about the author, voice state included, taken from the driver. The test only
+has one Discord account, so this stands in for a second user, e.g. to test
+fairplay's per-user rotation. ``.`` can't appear in a slash command option
+name, so the key never collides with a real option.
 """
 
 from __future__ import annotations
@@ -32,6 +39,8 @@ from typing import Any, Callable
 _log = logging.getLogger(__name__)
 
 PREFIX = 'e2e'
+# Hook-level request argument: run the command as another user ID.
+AS_USER_ARG = 'e2e.as'
 READY_REQUEST_ID = '-'
 MAX_MESSAGE_LEN = 2000
 
@@ -109,6 +118,24 @@ def _convert(option, value: str):
     if type_name == 'boolean':
         return value.lower() in ('1', 'true', 'yes')
     return value
+
+
+class StandInAuthor:
+    """The driver member, but with another user ID: a second user as far as
+    the command handlers can tell. They only use the author's ID and voice."""
+
+    def __init__(self, member, user_id: int):
+        self._member = member
+        self.id = user_id
+
+    def __getattr__(self, name):
+        return getattr(self._member, name)
+
+
+def parse_user_id(value: str) -> int:
+    if not value.isdigit():
+        raise ParseError(f'{AS_USER_ARG} must be a numeric user ID, got {value!r}')
+    return int(value)
 
 
 class ControlContext:
@@ -225,8 +252,12 @@ def install(bot, command_group, *, driver_id: int, channel_id: int, nonce: str):
         if command is None:
             await respond(f'error UnknownCommand: {request.command}')
             return
-        kwargs = bind_arguments(command, request.args)
+        args = dict(request.args)
+        as_user = args.pop(AS_USER_ARG, None)
+        kwargs = bind_arguments(command, args)
         author = message.guild.get_member(driver_id) or message.author
+        if as_user is not None:
+            author = StandInAuthor(author, parse_user_id(as_user))
         ctx = ControlContext(message, author, respond)
         await command.callback(ctx, **kwargs)
         if not ctx.responses:
