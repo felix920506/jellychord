@@ -150,12 +150,14 @@ def playNextTrack(guild, error=None):
             # find the next user to play from
             userIds = list(queues[guild.id].keys())
             thisIdx = userIds.index(thisTrackUser) if thisTrackUser in userIds else -1
-            nextIdx = (thisIdx + 1) % len(userIds)
-
             # clean up any empty queues for users
             if not queues[guild.id][thisTrackUser]:
                 queues[guild.id].pop(thisTrackUser)
-                nextIdx -= 1
+                # the following user has shifted into thisIdx; wrap if this user was last
+                remaining = len(queues[guild.id])
+                nextIdx = thisIdx % remaining if remaining else 0
+            else:
+                nextIdx = (thisIdx + 1) % len(userIds)
 
             playing[guild.id]['nextTrackUserIdx'] = nextIdx
 

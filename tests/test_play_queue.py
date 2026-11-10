@@ -190,6 +190,57 @@ class PlayQueueTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.main.JF_APICLIENT.audio_requests, [("user-100-a", 96_000)])
         self.assertEqual(len(voice_client.play_calls), 1)
 
+    def _drain_fairplay_queue(self, user_queues):
+        self.main.config["fairplay"] = True
+        voice_client = FakeVoiceClient()
+        guild = types.SimpleNamespace(id=42, voice_client=voice_client)
+        self.main.queues[42] = {
+            user_id: [queue_entry(track_id) for track_id in track_ids]
+            for user_id, track_ids in user_queues.items()
+        }
+        self.main.JF_APICLIENT = FakeJFAPI()
+
+        played, previews = [], []
+        while 42 in self.main.queues:
+            self.main.playNextTrack(guild)
+            played.append(self.main.playing[42]["Id"])
+            previews.append(queue_ids(self.main.getFlattenedPlayQueue(42)))
+        return played, previews
+
+    def test_play_next_track_fairplay_rotation_when_a_user_runs_out(self):
+        cases = {
+            "first": ({100: ["a1"], 200: ["b1", "b2"], 300: ["c1", "c2"]}, ["a1", "b1", "c1", "b2", "c2"]),
+            "middle": ({100: ["a1", "a2"], 200: ["b1"], 300: ["c1", "c2"]}, ["a1", "b1", "c1", "a2", "c2"]),
+            "last": ({100: ["a1", "a2"], 200: ["b1", "b2"], 300: ["c1"]}, ["a1", "b1", "c1", "a2", "b2"]),
+        }
+        for position, (user_queues, expected) in cases.items():
+            with self.subTest(user_running_out=position):
+                self.main.queues.clear()
+                self.main.playing.clear()
+
+                played, previews = self._drain_fairplay_queue(user_queues)
+
+                self.assertEqual(played, expected)
+                # the /queue preview after each track must match what actually plays next
+                for i, preview in enumerate(previews):
+                    self.assertEqual(preview, expected[i + 1:])
+
+    def test_play_next_track_fairplay_last_user_running_out_resets_to_first_user(self):
+        self.main.config["fairplay"] = True
+        voice_client = FakeVoiceClient()
+        guild = types.SimpleNamespace(id=42, voice_client=voice_client)
+        self.main.queues[42] = {
+            100: [queue_entry("user-100-a")],
+            200: [queue_entry("user-200-a")],
+        }
+        self.main.playing[42] = {"nextTrackUserIdx": 1}
+        self.main.JF_APICLIENT = FakeJFAPI()
+
+        self.main.playNextTrack(guild)
+
+        self.assertEqual(self.main.playing[42]["Id"], "user-200-a")
+        self.assertEqual(self.main.playing[42]["nextTrackUserIdx"], 0)
+
     def test_play_next_track_disconnects_when_queue_is_empty(self):
         voice_client = FakeVoiceClient()
         guild = types.SimpleNamespace(id=42, voice_client=voice_client)
