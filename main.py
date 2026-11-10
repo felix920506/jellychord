@@ -189,7 +189,11 @@ def loadAudio(url: str) -> discord.FFmpegOpusAudio:
     """Start ffmpeg and wait for the first packet. Blocking, so run it in a
     thread; it only touches the new audio source, never shared state."""
     audio = discord.FFmpegOpusAudio(url, codec='copy')
-    audio.read()
+    try:
+        audio.read()
+    except BaseException:
+        audio.cleanup()
+        raise
     return audio
 
 def onTrackEnd(loop: asyncio.AbstractEventLoop, guild: discord.Guild, error: Exception | None):
@@ -243,7 +247,16 @@ async def _advanceTrack(guild: discord.Guild):
         entry['playtime-offset'] = datetime.timedelta()
         entry['starttime'] = datetime.datetime.now()
         loop = asyncio.get_running_loop()
-        vc.play(audio, after=lambda e: onTrackEnd(loop, guild, e))
+        try:
+            vc.play(audio, after=lambda e: onTrackEnd(loop, guild, e))
+        except Exception:
+            # No player started, so no after= callback will ever advance the
+            # queue. Leave voice so /start can pick up the remaining tracks.
+            log.exception('Could not play track %s in guild %s', entry["Id"], guild.id)
+            audio.cleanup()
+            playing.pop(guild.id, None)
+            await vc.disconnect(force=True)
+            return
         if entry['paused']:
             # /pause arrived while the track was loading
             vc.pause()
@@ -410,6 +423,9 @@ class listView(discord.ui.View):
 
 '''
 Bot Commands
+
+Handlers change queues/playing before awaiting ctx.respond(): a track can end,
+and advanceTrack() run, while the reply is being sent to Discord.
 '''
 if DEBUG:
     cmdgrp = bot.create_group(config['command-group'], guild_ids=[DEBUG_SERVER])
@@ -457,8 +473,8 @@ async def skip(ctx: discord.ApplicationContext):
     if not ctx.voice_client:
         await ctx.respond('Not currently playing')
     else:
-        await ctx.respond('Skipping current track')
         skipCurrentTrack(ctx.guild)
+        await ctx.respond('Skipping current track')
 
 @cmdgrp.command()
 async def nowplaying(ctx: discord.ApplicationContext):
@@ -495,45 +511,40 @@ async def start(ctx: discord.ApplicationContext):
 
 @cmdgrp.command()
 async def pause(ctx: discord.ApplicationContext):
-    global playing
-    if ctx.voice_client and ctx.guild_id not in playing:
-        await ctx.respond('Not Currently Playing')
-    elif ctx.voice_client:
-        if playing[ctx.guild_id]['paused']:
-            await ctx.respond('Already paused')
-        else:
-            await ctx.respond('Pausing playback')
-            td = datetime.datetime.now() - playing[ctx.guild_id]['starttime']
-            playing[ctx.guild_id]['paused'] = True
-            playing[ctx.guild_id]['playtime-offset'] += td
-            ctx.voice_client.pause()
-    else:
+    if not ctx.voice_client:
         await ctx.respond('Not connect to any voice channel')
+    elif ctx.guild_id not in playing:
+        await ctx.respond('Not Currently Playing')
+    elif playing[ctx.guild_id]['paused']:
+        await ctx.respond('Already paused')
+    else:
+        track = playing[ctx.guild_id]
+        track['playtime-offset'] += datetime.datetime.now() - track['starttime']
+        track['paused'] = True
+        ctx.voice_client.pause()
+        await ctx.respond('Pausing playback')
 
 @cmdgrp.command()
 async def resume(ctx: discord.ApplicationContext):
-    global playing
-    if ctx.voice_client and ctx.guild_id not in playing:
-        await ctx.respond('Not Currently Playing')
-    elif ctx.voice_client:
-        if playing[ctx.guild_id]['paused']:
-            await ctx.respond('Resuming playback')
-            playing[ctx.guild_id]['starttime'] = datetime.datetime.now()
-            playing[ctx.guild_id]['paused'] = False
-            ctx.voice_client.resume()
-        else:
-            await ctx.respond('Already playing')
-    else:
+    if not ctx.voice_client:
         await ctx.respond('Not connect to any voice channel')
+    elif ctx.guild_id not in playing:
+        await ctx.respond('Not Currently Playing')
+    elif not playing[ctx.guild_id]['paused']:
+        await ctx.respond('Already playing')
+    else:
+        track = playing[ctx.guild_id]
+        track['starttime'] = datetime.datetime.now()
+        track['paused'] = False
+        ctx.voice_client.resume()
+        await ctx.respond('Resuming playback')
 
 @cmdgrp.command()
 async def stop(ctx: discord.ApplicationContext):
     if ctx.voice_client:
-        await ctx.respond('Stopping playback')
-        global queues
-        if ctx.guild_id in queues:
-            queues.pop(ctx.guild_id)
+        queues.pop(ctx.guild_id, None)
         skipCurrentTrack(ctx.guild)
+        await ctx.respond('Stopping playback')
     else:
         await ctx.respond('Not connected to any voice channel')
 
@@ -543,7 +554,6 @@ async def shuffle(ctx: discord.ApplicationContext):
     if not ctx.guild_id in queues:
         await ctx.respond('Playlist is empty')
     else:
-        await ctx.respond('Shuffling playlist')
         if config.get('fairplay'):
             for userId in queues[ctx.guild_id]:
                 random.shuffle(queues[ctx.guild_id][userId])
@@ -554,6 +564,7 @@ async def shuffle(ctx: discord.ApplicationContext):
             queues[ctx.guild_id] = shuffledQueues
         else:
             random.shuffle(queues[ctx.guild_id])
+        await ctx.respond('Shuffling playlist')
 
 @cmdgrp.command()
 async def remove(ctx: discord.ApplicationContext,
@@ -646,8 +657,8 @@ if not config.get('fairplay'):
         else:
             item = queues[ctx.guild_id].pop(index-1)
             queues[ctx.guild_id].insert(0, item)
-            await ctx.respond(f'Now playing track: {getTrackString(item)}')
             skipCurrentTrack(ctx.guild)
+            await ctx.respond(f'Now playing track: {getTrackString(item)}')
 
 @cmdgrp.command()
 async def clear(ctx: discord.ApplicationContext):
@@ -655,8 +666,8 @@ async def clear(ctx: discord.ApplicationContext):
     if not ctx.guild_id in queues:
         await ctx.respond('Playlist is empty')
     else:
-        await ctx.respond('Playlist cleared')
         queues.pop(ctx.guild_id)
+        await ctx.respond('Playlist cleared')
 
 '''
 Debug Commands

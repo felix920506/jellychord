@@ -83,18 +83,27 @@ class FakeVoiceClient:
 
     def stop(self):
         self.stopped = True
+        was_playing = self._playing
         self._playing = False
         self._paused = False
+        if was_playing:
+            # py-cord's player thread calls after= once it notices the stop
+            self._call_after()
 
     def finish_track(self):
-        """End the current track the way py-cord does: from another thread."""
+        """End the current track naturally."""
         self._playing = False
+        self._paused = False
+        self._call_after()
+
+    def _call_after(self):
+        # Like py-cord, run the callback on a thread other than the event loop's.
         _, after = self.play_calls[-1]
         thread = threading.Thread(target=after, args=(None,))
         thread.start()
         thread.join()
 
-    async def disconnect(self):
+    async def disconnect(self, force=False):
         self.disconnect_requested = True
         self.connected = False
 
@@ -355,6 +364,119 @@ class PlayQueueTests(unittest.IsolatedAsyncioTestCase):
             [call.args[0] for call in ctx.respond.await_args_list],
             ["Not Currently Playing", "Not Currently Playing"],
         )
+
+    async def test_play_failure_cleans_up_and_leaves_voice(self):
+        voice_client = FakeVoiceClient()
+        guild = types.SimpleNamespace(id=42, voice_client=voice_client)
+        self.main.queues[42] = [queue_entry("first"), queue_entry("second")]
+        loads = []
+        real_load_audio = self.main.loadAudio
+
+        def recording_load_audio(url):
+            loads.append(real_load_audio(url))
+            return loads[-1]
+
+        def failing_play(audio, after):
+            raise RuntimeError("Not connected to voice.")
+
+        voice_client.play = failing_play
+        with mock.patch.object(self.main, "loadAudio", recording_load_audio), self.assertLogs("jellychord", "ERROR"):
+            await self.main.advanceTrack(guild)
+
+        self.assertTrue(loads[0].cleaned_up)
+        self.assertTrue(voice_client.disconnect_requested)
+        self.assertNotIn(42, self.main.playing)
+        # the rest of the queue is kept for /start
+        self.assertEqual(queue_ids(self.main.queues[42]), ["second"])
+
+    async def test_failed_first_read_cleans_up_ffmpeg(self):
+        created = []
+        real_audio_class = self.main.discord.FFmpegOpusAudio
+
+        class FailingAudio(real_audio_class):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                created.append(self)
+
+            def read(self):
+                raise OSError("stream unavailable")
+
+        with mock.patch.object(self.main.discord, "FFmpegOpusAudio", FailingAudio):
+            with self.assertRaises(OSError):
+                self.main.loadAudio("https://stream.example/broken")
+
+        self.assertTrue(created[0].cleaned_up)
+
+    # A track can end, and advanceTrack run, while a command awaits its reply.
+    # These replay that interleaving: "first" ends during ctx.respond().
+
+    async def test_skip_when_track_ends_during_reply_skips_only_once(self):
+        voice_client, ctx = await self.start_playing(["first", "second", "third"])
+
+        await self.main.skip(ctx)
+
+        self.assertEqual(self.main.playing[42]["Id"], "second")
+        self.assertTrue(voice_client.is_playing())
+
+    async def test_playnow_when_track_ends_during_reply_plays_requested_track(self):
+        voice_client, ctx = await self.start_playing(["first", "second", "third"])
+
+        await self.main.playnow(ctx, 2)
+
+        self.assertEqual(self.main.playing[42]["Id"], "third")
+        self.assertTrue(voice_client.is_playing())
+        self.assertEqual(queue_ids(self.main.queues[42]), ["second"])
+
+    async def test_pause_when_last_track_ends_during_reply(self):
+        voice_client, ctx = await self.start_playing(["first"])
+
+        await self.main.pause(ctx)
+
+        ctx.respond.assert_awaited_once_with("Pausing playback")
+        self.assertTrue(voice_client.disconnect_requested)
+
+    async def test_resume_when_last_track_ends_during_reply(self):
+        voice_client, ctx = await self.start_playing(["first"])
+        self.main.playing[42]["paused"] = True
+        voice_client.pause()
+
+        await self.main.resume(ctx)
+
+        ctx.respond.assert_awaited_once_with("Resuming playback")
+        self.assertTrue(voice_client.disconnect_requested)
+
+    async def test_shuffle_when_last_queued_track_starts_during_reply(self):
+        voice_client, ctx = await self.start_playing(["first", "second"])
+
+        await self.main.shuffle(ctx)
+
+        ctx.respond.assert_awaited_once_with("Shuffling playlist")
+        self.assertEqual(self.main.playing[42]["Id"], "second")
+
+    async def test_clear_when_track_ends_during_reply_plays_nothing_more(self):
+        voice_client, ctx = await self.start_playing(["first", "second"])
+
+        await self.main.clear(ctx)
+
+        ctx.respond.assert_awaited_once_with("Playlist cleared")
+        self.assertEqual(len(voice_client.play_calls), 1)
+        self.assertTrue(voice_client.disconnect_requested)
+
+    async def start_playing(self, track_ids):
+        """Start playing track_ids[0] with the rest queued. Returns a voice
+        client and a context whose reply lets "first" end mid-await."""
+        voice_client = FakeVoiceClient()
+        ctx = FakeContext(voice_client=voice_client)
+        self.main.queues[42] = [queue_entry(track_id) for track_id in track_ids]
+        await self.main.advanceTrack(ctx.guild)
+
+        async def first_track_ends_during_reply(*args, **kwargs):
+            if voice_client._playing and self.main.playing.get(42, {}).get("Id") == "first":
+                voice_client.finish_track()
+            await self.wait_for(lambda: voice_client.is_playing() or voice_client.disconnect_requested)
+
+        ctx.respond = mock.AsyncMock(side_effect=first_track_ends_during_reply)
+        return voice_client, ctx
 
     async def wait_for(self, predicate, timeout=5):
         async with asyncio.timeout(timeout):
