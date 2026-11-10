@@ -606,4 +606,11 @@ if DEBUG:
     async def printplaylist(ctx: discord.ApplicationContext):
         await ctx.respond(queues.get(ctx.guild_id, 'Playlist is empty'), ephemeral=True)
 
+'''
+End-to-end test hook (inert unless JELLYCHORD_E2E_DRIVER_ID is set)
+'''
+if os.getenv('JELLYCHORD_E2E_DRIVER_ID'):
+    from jellychord import e2e_control
+    e2e_control.install_from_env(bot, cmdgrp)
+
 bot.run(config['discord-token'])

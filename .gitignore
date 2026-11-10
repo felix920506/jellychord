@@ -161,3 +161,9 @@ cython_debug/
 .DS_Store
 config.yml
 /.vscode
+
+# E2E canary
+tests/e2e/node_modules/
+tests/e2e/results/
+tests/e2e/.work/
+!tests/e2e/lib/
