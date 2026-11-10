@@ -77,8 +77,17 @@ comments on, or closes issues labelled `e2e-canary`:
 * **Tests pass again.** Closes the issue automatically.
 
 All logs and artifacts go through a redactor, because Actions logs and
-artifacts are public on a public repo. Fork PRs don't get secrets, so they
-skip the Discord tests.
+artifacts are public on a public repo.
+
+CI is split in two:
+
+* **`tests.yml`** runs the credential-free unit tests (bot and harness) on
+  every push and every PR, forks included.
+* **`e2e.yml`** uses the bot tokens. It only runs for schedules, manual runs,
+  pushes to `main`, and PRs whose branch lives in this repository. Only
+  people with write access can push such a branch, so outside contributors'
+  fork PRs never reach it. It uses `pull_request`, never
+  `pull_request_target`, so fork code is never run with secrets.
 
 > [!NOTE]
 > The `image` track only works once an image containing

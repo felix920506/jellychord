@@ -5,6 +5,14 @@ name: E2E Discord canary
 # Breakage usually comes from Discord-side changes, not commits, so the full
 # matrix runs on a schedule and failures open/update GitHub issues.
 # Setup: tests/e2e/README.md
+#
+# This workflow uses the Discord bot tokens. It must only ever run code from
+# people with write access to this repo:
+#   * the `pull_request` trigger (never `pull_request_target`) runs fork code
+#     without secrets, and
+#   * the `plan` job additionally skips every PR whose branch is not in this
+#     repo, so outside contributors' PRs never reach the credentialed jobs.
+# Credential-free checks live in tests.yml.
 
 on:
   schedule:
@@ -30,39 +38,9 @@ permissions:
   contents: read
 
 jobs:
-  unit:
-    runs-on: ubuntu-latest
-    steps:
-      - name: checkout repo
-        uses: actions/checkout@v7
-
-      - name: setup python
-        uses: actions/setup-python@v6
-        with:
-          python-version: 3.12
-
-      - name: install poetry dependencies
-        run: |
-          python3 -m pip install poetry
-          poetry install --no-root
-
-      - name: python unit tests
-        run: poetry run python -m unittest discover -s tests -t . -v
-
-      - name: setup node
-        uses: actions/setup-node@v7
-        with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: tests/e2e/package-lock.json
-
-      - name: e2e harness unit tests
-        working-directory: tests/e2e
-        run: |
-          npm ci
-          npm test
-
   plan:
+    # Outside contributors (fork PRs) never get past this point.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     outputs:
       enabled: ${{ steps.plan.outputs.enabled }}
@@ -108,7 +86,7 @@ jobs:
 
   e2e:
     name: e2e (${{ matrix.track }})
-    needs: [unit, plan]
+    needs: plan
     if: needs.plan.outputs.enabled == 'true'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
