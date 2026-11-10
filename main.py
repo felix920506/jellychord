@@ -5,6 +5,7 @@ import yaml
 import random
 import datetime
 import os
+import time
 import logging
 from itertools import zip_longest
 
@@ -71,6 +72,17 @@ playing = {}
 # guild id -> True if a skip was requested while the next track was loading
 loading = {}
 playerLocks = {}
+# Guilds where the bot itself started a voice disconnect (stopPlayback). A flag
+# left behind when no leave event arrives is discarded by startPlayer when the
+# next voice session starts.
+expectedDisconnects = set()
+# Per-guild counter bumped on every bot leave event and every new voice session,
+# so a listener still waiting on an older leave knows it has been superseded.
+voiceEpochs = {}
+# How long onVoiceStateUpdate waits to see whether py-cord recovers a dropped
+# voice connection, and how often it checks.
+VOICE_RECOVERY_TIMEOUT = 60
+VOICE_POLL_INTERVAL = 0.25
 
 bot = discord.Bot()
 
@@ -149,6 +161,8 @@ async def startPlayer(ctx: discord.ApplicationContext):
     if not vc:
         av = ctx.author.voice
         if av:
+            expectedDisconnects.discard(ctx.guild.id)
+            bumpVoiceEpoch(ctx.guild.id)
             vc = await av.channel.connect()
             await playTrack(ctx.guild)
 
@@ -325,10 +339,51 @@ async def stopPlayback(guild: discord.Guild, vc):
     """Forget the current track and leave the voice channel. Tracks still
     queued are kept, so /start can pick them up."""
     playing.pop(guild.id, None)
+    # tell onVoiceStateUpdate this leave is ours, so it keeps the queue
+    expectedDisconnects.add(guild.id)
     try:
         await vc.disconnect(force=True)
     except Exception:
         log.exception('Failed to disconnect from voice in guild %s', guild.id)
+
+def clearGuildState(guildId: int):
+    queues.pop(guildId, None)
+    playing.pop(guildId, None)
+
+def bumpVoiceEpoch(guildId: int) -> int:
+    voiceEpochs[guildId] = voiceEpochs.get(guildId, 0) + 1
+    return voiceEpochs[guildId]
+
+async def onVoiceStateUpdate(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+    """Drop the guild's queue and now-playing state when the bot is kicked or
+    disconnected from voice by someone else, so a later /play starts fresh."""
+    if bot.user is None or member.id != bot.user.id:
+        return
+    if before.channel is None or after.channel is not None:
+        return
+
+    guild = member.guild
+    epoch = bumpVoiceEpoch(guild.id)
+    if guild.id in expectedDisconnects:
+        # The bot left on its own (stopPlayback); queued tracks are kept for /start.
+        expectedDisconnects.discard(guild.id)
+        return
+
+    # py-cord also leaves and rejoins by itself while recovering a dropped voice
+    # connection, keeping the same voice client. Only clear state once the voice
+    # client is actually gone.
+    vc = guild.voice_client
+    deadline = time.monotonic() + VOICE_RECOVERY_TIMEOUT
+    while vc is not None and guild.voice_client is vc and not vc.is_connected():
+        if time.monotonic() >= deadline:
+            return
+        await asyncio.sleep(VOICE_POLL_INTERVAL)
+    # Skip if a later leave or a new voice session happened while waiting.
+    if guild.voice_client is None and voiceEpochs.get(guild.id) == epoch:
+        log.info('Removed from voice in guild %s, clearing its queue', guild.id)
+        clearGuildState(guild.id)
+
+bot.add_listener(onVoiceStateUpdate, 'on_voice_state_update')
 
 
 def getTrackString(item: dict, artistLimit: int = 1, showType: bool = False, showSize: bool = False):

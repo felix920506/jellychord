@@ -828,5 +828,198 @@ class EmptyAlbumTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(ctx.responses, ["That album has no tracks to play"])
 
 
+class VoiceStateListenerTests(unittest.IsolatedAsyncioTestCase):
+    """onVoiceStateUpdate clears a guild's state when the bot is kicked or
+    disconnected from voice, but not when it leaves on its own, moves, or
+    py-cord briefly drops and recovers the connection."""
+
+    BOT_ID = 999
+
+    @classmethod
+    def setUpClass(cls):
+        cls.main = import_main_with_stubs()
+
+    def setUp(self):
+        self.main.queues.clear()
+        self.main.playing.clear()
+        self.main.loading.clear()
+        self.main.playerLocks.clear()
+        self.main.expectedDisconnects.clear()
+        self.main.voiceEpochs.clear()
+        self.main.config["fairplay"] = False
+        self.main.JF_APICLIENT = FakeJFAPI()
+        self.main.bot.user = types.SimpleNamespace(id=self.BOT_ID)
+        self.main.queues[42] = [queue_entry("queued")]
+        self.main.playing[42] = queue_entry("current")
+        self.main.queues[7] = [queue_entry("other-guild")]
+        self.guild = types.SimpleNamespace(id=42, voice_client=None)
+
+    def member(self, member_id):
+        return types.SimpleNamespace(id=member_id, guild=self.guild)
+
+    def voice_state(self, channel):
+        return types.SimpleNamespace(channel=channel)
+
+    async def bot_leaves(self):
+        await self.main.onVoiceStateUpdate(
+            self.member(self.BOT_ID), self.voice_state(object()), self.voice_state(None)
+        )
+
+    def test_listener_is_registered(self):
+        self.assertIn(
+            ("on_voice_state_update", self.main.onVoiceStateUpdate),
+            self.main.bot.listeners,
+        )
+
+    async def test_kick_clears_guild_state(self):
+        await self.bot_leaves()
+
+        self.assertNotIn(42, self.main.queues)
+        self.assertNotIn(42, self.main.playing)
+        self.assertEqual(queue_ids(self.main.queues[7]), ["other-guild"])
+
+    async def test_kick_clears_state_once_voice_client_is_removed(self):
+        # py-cord marks the connection disconnected first and removes the voice
+        # client a moment later.
+        voice_client = FakeVoiceClient()
+        voice_client.connected = False
+        self.guild.voice_client = voice_client
+
+        async def fake_sleep(delay):
+            self.guild.voice_client = None
+
+        with mock.patch.object(self.main.asyncio, "sleep", fake_sleep):
+            await self.bot_leaves()
+
+        self.assertNotIn(42, self.main.queues)
+        self.assertNotIn(42, self.main.playing)
+
+    async def test_play_after_kick_does_not_replay_old_queue(self):
+        await self.bot_leaves()
+        ctx = FakeContext(voice_client=None)
+
+        with mock.patch.object(self.main, "startPlayer", mock.AsyncMock()):
+            await self.main.playHelperGeneric(raw_track("requested"), ctx, "last")
+
+        self.assertEqual(queue_ids(self.main.queues[42]), ["requested"])
+
+    async def test_voice_reconnect_keeps_state(self):
+        # py-cord leaves and rejoins on its own while recovering a dropped
+        # connection, keeping the same voice client.
+        voice_client = FakeVoiceClient()
+        voice_client.connected = False
+        self.guild.voice_client = voice_client
+
+        async def fake_sleep(delay):
+            voice_client.connected = True
+
+        with mock.patch.object(self.main.asyncio, "sleep", fake_sleep):
+            await self.bot_leaves()
+
+        self.assertEqual(queue_ids(self.main.queues[42]), ["queued"])
+        self.assertEqual(self.main.playing[42]["Id"], "current")
+
+    async def test_voice_that_never_recovers_keeps_state(self):
+        voice_client = FakeVoiceClient()
+        voice_client.connected = False
+        self.guild.voice_client = voice_client
+
+        with mock.patch.object(self.main, "VOICE_RECOVERY_TIMEOUT", 0.01), \
+                mock.patch.object(self.main, "VOICE_POLL_INTERVAL", 0.005):
+            await self.bot_leaves()
+
+        self.assertIn(42, self.main.queues)
+        self.assertIn(42, self.main.playing)
+
+    async def test_own_leave_keeps_track_queued_while_leaving(self):
+        # The queue ran out and the bot started leaving; someone /play'd
+        # before the leave event arrived. /start should still find the track.
+        self.main.queues.pop(42)
+        voice_client = FakeVoiceClient()
+        self.guild.voice_client = voice_client
+
+        await self.main.advanceTrack(self.guild)
+        self.assertTrue(voice_client.disconnect_requested)
+        self.assertIn(42, self.main.expectedDisconnects)
+
+        await self.main.playHelperGeneric(raw_track("late"), FakeContext(voice_client=voice_client), "last")
+        self.guild.voice_client = None
+        await self.bot_leaves()
+
+        self.assertEqual(queue_ids(self.main.queues[42]), ["late"])
+        self.assertNotIn(42, self.main.expectedDisconnects)
+
+    async def test_kick_after_own_leave_is_handled_normally(self):
+        self.main.expectedDisconnects.add(42)
+        await self.bot_leaves()  # the bot's own leave consumes the flag
+        self.main.queues[42] = [queue_entry("new-session")]
+
+        await self.bot_leaves()
+
+        self.assertNotIn(42, self.main.queues)
+
+    async def test_older_listener_does_not_clear_after_later_own_leave(self):
+        # Listener A waits on a reconnect leave. Meanwhile the bot recovers,
+        # finishes the queue and leaves on its own (listener B), and someone
+        # queues a track. A must not delete it when it wakes.
+        voice_client = FakeVoiceClient()
+        voice_client.connected = False
+        self.guild.voice_client = voice_client
+        self.main.queues[42] = [queue_entry("late")]
+
+        async def fake_sleep(delay):
+            self.main.expectedDisconnects.add(42)
+            self.guild.voice_client = None
+            await self.bot_leaves()
+
+        with mock.patch.object(self.main.asyncio, "sleep", fake_sleep):
+            await self.bot_leaves()
+
+        self.assertEqual(queue_ids(self.main.queues[42]), ["late"])
+
+    async def test_listener_does_not_clear_after_new_session_starts(self):
+        voice_client = FakeVoiceClient()
+        voice_client.connected = False
+        self.guild.voice_client = voice_client
+        new_client = FakeVoiceClient()
+        ctx = FakeContext()
+        ctx.guild = self.guild
+
+        async def connect():
+            self.guild.voice_client = new_client
+            return new_client
+
+        ctx.author.voice = types.SimpleNamespace(channel=types.SimpleNamespace(connect=connect))
+
+        async def fake_sleep(delay):
+            # kicked, then /play starts a new session before the listener wakes
+            self.guild.voice_client = None
+            self.main.expectedDisconnects.add(42)  # stale flag from an earlier session
+            with mock.patch.object(self.main, "playTrack", mock.AsyncMock()):
+                await self.main.startPlayer(ctx)
+
+        with mock.patch.object(self.main.asyncio, "sleep", fake_sleep):
+            await self.bot_leaves()
+
+        self.assertIn(42, self.main.queues)
+        self.assertNotIn(42, self.main.expectedDisconnects)
+
+    async def test_bot_moving_channels_keeps_state(self):
+        await self.main.onVoiceStateUpdate(
+            self.member(self.BOT_ID), self.voice_state(object()), self.voice_state(object())
+        )
+
+        self.assertIn(42, self.main.queues)
+        self.assertIn(42, self.main.playing)
+
+    async def test_other_member_leaving_voice_keeps_state(self):
+        await self.main.onVoiceStateUpdate(
+            self.member(123), self.voice_state(object()), self.voice_state(None)
+        )
+
+        self.assertIn(42, self.main.queues)
+        self.assertIn(42, self.main.playing)
+
+
 if __name__ == "__main__":
     unittest.main()
