@@ -6,6 +6,10 @@
 //   * receives the SUT's voice audio through Discord (DAVE E2EE included),
 //     counting raw RTP packets, decrypted Opus frames and decoded PCM separately
 //     so a failure can be pinned to a specific layer, and feeds PCM to a ToneTracker.
+//
+// With `listen: false` it only sends requests and joins voice (deafened): the
+// second user of two-user scenarios. Each instance in one process needs its own
+// `voiceGroup`, since @discordjs/voice keeps one connection per guild and group.
 
 import { randomBytes } from 'node:crypto';
 
@@ -31,7 +35,8 @@ export function quoteArg(value) {
 }
 
 export class Driver {
-  constructor({ token, guildId, controlChannelId, voiceChannelId, sutId, nonce, toneCandidates, log }) {
+  constructor({ token, guildId, controlChannelId, voiceChannelId, sutId, nonce, toneCandidates, log,
+                listen = true, voiceGroup = 'default' }) {
     this.token = token;
     this.guildId = guildId;
     this.controlChannelId = controlChannelId;
@@ -39,6 +44,8 @@ export class Driver {
     this.sutId = sutId;
     this.nonce = nonce;
     this.log = log ?? (() => {});
+    this.listen = listen;
+    this.voiceGroup = voiceGroup;
     this.toneCandidates = toneCandidates;
     this.tracker = new ToneTracker(toneCandidates);
     this.stats = { rtpPackets: 0, opusFrames: 0, decodeErrors: 0, streamErrors: [], subscriptions: 0 };
@@ -186,7 +193,8 @@ export class Driver {
       channelId: this.voiceChannelId,
       guildId: this.guildId,
       adapterCreator: this.guild.voiceAdapterCreator,
-      selfDeaf: false,
+      group: this.voiceGroup,
+      selfDeaf: !this.listen,
       selfMute: true,
       daveEncryption: true,
       debug: true,
@@ -194,12 +202,12 @@ export class Driver {
     this.connection.on('debug', (m) => this.log(`[voice] ${m}`));
     this.connection.on('error', (err) => this.log(`[voice error] ${err.message}`));
     await entersState(this.connection, VoiceConnectionStatus.Ready, 30_000);
-    this.instrumentReceiver();
+    if (this.listen) this.instrumentReceiver();
   }
 
   async leaveVoice() {
     this.unsubscribe();
-    const conn = this.connection ?? getVoiceConnection(this.guildId);
+    const conn = this.connection ?? getVoiceConnection(this.guildId, this.voiceGroup);
     if (conn) {
       conn.destroy();
       this.connection = null;

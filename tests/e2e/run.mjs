@@ -16,7 +16,7 @@ import { Jellyfin } from './lib/jellyfin.mjs';
 import { poll, sleep } from './lib/proc.mjs';
 import { Redactor } from './lib/redact.mjs';
 import { Report, StepFailure, renderMarkdown } from './lib/report.mjs';
-import { STAND_IN_ARG, STAND_IN_USER_ID, standInProbeOutcome } from './lib/stand-in.mjs';
+import { DRIVERS_COMMAND, secondDriverProbeOutcome } from './lib/second-driver.mjs';
 import { Sut } from './lib/sut.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -29,7 +29,10 @@ const EXPECTED_SUBCOMMANDS = [
 ];
 
 function loadConfig(env = process.env) {
-  const required = ['E2E_SUT_TOKEN', 'E2E_DRIVER_TOKEN', 'E2E_GUILD_ID', 'E2E_CONTROL_CHANNEL_ID', 'E2E_VOICE_CHANNEL_ID'];
+  const required = [
+    'E2E_SUT_TOKEN', 'E2E_DRIVER_TOKEN', 'E2E_SECOND_DRIVER_TOKEN',
+    'E2E_GUILD_ID', 'E2E_CONTROL_CHANNEL_ID', 'E2E_VOICE_CHANNEL_ID',
+  ];
   const missing = required.filter((k) => !env[k]);
   if (missing.length) {
     console.error(`Missing required environment variables: ${missing.join(', ')}\nSee tests/e2e/README.md for setup.`);
@@ -38,6 +41,7 @@ function loadConfig(env = process.env) {
   return {
     sutToken: env.E2E_SUT_TOKEN,
     driverToken: env.E2E_DRIVER_TOKEN,
+    secondDriverToken: env.E2E_SECOND_DRIVER_TOKEN,
     guildId: env.E2E_GUILD_ID,
     controlChannelId: env.E2E_CONTROL_CHANNEL_ID,
     voiceChannelId: env.E2E_VOICE_CHANNEL_ID,
@@ -58,6 +62,7 @@ const nonce = `${Date.now().toString(36)}${randomBytes(3).toString('hex')}`;
 const redactor = new Redactor({
   'sut-token': cfg.sutToken,
   'driver-token': cfg.driverToken,
+  'second-driver-token': cfg.secondDriverToken,
   'guild-id': cfg.guildId,
   'control-channel-id': cfg.controlChannelId,
   'voice-channel-id': cfg.voiceChannelId,
@@ -69,6 +74,8 @@ report.meta = { track: cfg.track, sutMode: cfg.sutMode, sutImage: cfg.sutMode ==
 
 let jellyfin;
 let driver;
+// The second user in two-user scenarios: another bot account (see lib/second-driver.mjs).
+let second;
 let sut;
 
 const expectReply = (reply, expected) => {
@@ -230,7 +237,7 @@ async function scenarioPauseResumeStop() {
 // Fairplay is read once at startup, so this scenario restarts the bot with
 // JELLYCHORD_ENABLE_FAIRPLAY=1 and restarts it with fairplay off again at the
 // end; every other scenario runs with fairplay off. The second user is a
-// stand-in user ID (see lib/stand-in.mjs).
+// second bot account with its own voice state (see lib/second-driver.mjs).
 async function restartSut(name, envOverrides) {
   await resetPlayer();
   const readyBefore = driver.readyCount;
@@ -243,40 +250,54 @@ async function restartSut(name, envOverrides) {
 async function scenarioFairplay() {
   const delta = tone('Delta');
   const [a, b, c] = TONES.filter((t) => t.album === TONE_ALBUM);
-  const asOther = { [STAND_IN_ARG]: STAND_IN_USER_ID };
 
-  // A published image older than e2e.as can't run this scenario: skip it
-  // there rather than report the gap as a failure on every run.
+  // A published image older than extra drivers can't run this scenario: skip
+  // it there rather than report the gap as a failure on every run.
   await resetPlayer();
-  const probeName = 'bot under test accepts commands from a stand-in second user';
+  const probeName = 'bot under test accepts commands from the second test account';
+  let accepted = null;
   let probeError = null;
   try {
-    expectReply(await driver.command('queue', asOther), 'Empty Queue');
+    accepted = await driver.jsonCommand(DRIVERS_COMMAND);
   } catch (err) {
     probeError = err;
   }
-  const probe = standInProbeOutcome(probeError, cfg.sutMode);
-  if (probe === 'skip') {
-    report.skip('harness', probeName, 'this image predates the e2e.as stand-in user; fairplay scenario not run');
+  if (secondDriverProbeOutcome(probeError, cfg.sutMode) === 'skip') {
+    report.skip('harness', probeName, 'this image predates extra E2E drivers; fairplay scenario not run');
     return;
   }
   await report.step('harness', probeName, async () => {
     if (probeError) throw probeError;
+    if (!accepted.includes(second.userId)) {
+      throw new Error('the second test account is not among the accepted drivers (JELLYCHORD_E2E_EXTRA_DRIVER_IDS not passed?)');
+    }
+    expectReply(await second.command('ping'), 'pong');
   });
 
   await restartSut('bot restarts with fairplay on', { JELLYCHORD_ENABLE_FAIRPLAY: '1' });
-  // The listener's track plays while the rest is queued; it is long enough
-  // that nothing advances meanwhile.
+  // The listener is in voice, the second user isn't: the requester's own
+  // voice state decides.
+  await report.step('bot-behavior', 'fairplay: play refuses when the second user is not in voice', async () =>
+    expectReply(await second.command('play', { term: delta.title, type: 'Soundtrack' }), 'You are not in any voice channel'),
+  );
+  await report.step('harness', 'second test account joins the voice channel', () => second.joinVoice());
+  await sleep(1000); // let the SUT see the second account's voice state
+
+  // The second user's track starts the session and plays while the rest is
+  // queued; it is long enough that nothing advances meanwhile.
   const since = Date.now();
-  await driver.command('play', { term: delta.title, type: 'Soundtrack' });
+  await report.step('bot-behavior', 'fairplay: the second user starts playback', async () => {
+    expectReply(await second.command('play', { term: delta.title, type: 'Soundtrack' }), delta.title);
+    await orDied(driver.waitForSutVoice(cfg.voiceChannelId, 30_000));
+  });
   await hear('fairplay setup', delta.freq, { since });
   await report.step('bot-behavior', 'fairplay: two users queue tracks', async () => {
     expectReply(await driver.command('play', { term: a.title, type: 'Soundtrack' }), a.title);
     expectReply(await driver.command('play', { term: b.title, type: 'Soundtrack' }), b.title);
-    expectReply(await driver.command('play', { term: c.title, type: 'Soundtrack', ...asOther }), c.title);
+    expectReply(await second.command('play', { term: c.title, type: 'Soundtrack' }), c.title);
   });
   // when=now isn't offered in fairplay mode (#83); the hook can still send it.
-  // Had it gone through, it would skip the listener's track and queue another
+  // Had it gone through, it would skip the playing track and queue another
   // a, which the rotation order check below would hear.
   await report.step('bot-behavior', 'fairplay: play when=now is refused', async () =>
     expectReply(
@@ -293,7 +314,7 @@ async function scenarioFairplay() {
   );
   const skippedAt = Date.now();
   await report.step('bot-behavior', 'fairplay: tracks play in rotation order, then the bot leaves voice', async () => {
-    expectReply(await driver.command('skip'), 'Skipping current track');
+    expectReply(await second.command('skip'), 'Skipping current track');
     // All three tracks, plus time for each to load and for the leave.
     await orDied(driver.waitForSutVoice(null, (a.seconds + b.seconds + c.seconds) * 1000 + 60_000));
     const heard = driver.tracker.sequence({ since: skippedAt });
@@ -304,6 +325,7 @@ async function scenarioFairplay() {
       throw new Error(`expected tones ${expected.join(' → ')} before the bot left voice, heard ${JSON.stringify(heard)}`);
     }
   });
+  await report.step('harness', 'second test account leaves the voice channel', () => second.leaveVoice());
   await restartSut('bot restarts with fairplay off again', { JELLYCHORD_ENABLE_FAIRPLAY: '0' });
 }
 
@@ -352,6 +374,22 @@ async function main() {
     await driver.login();
     redactor.add('driver-user-id', driver.userId);
   });
+  second = new Driver({
+    token: cfg.secondDriverToken,
+    guildId: cfg.guildId,
+    controlChannelId: cfg.controlChannelId,
+    voiceChannelId: cfg.voiceChannelId,
+    sutId,
+    nonce,
+    toneCandidates: TONES.map((t) => t.freq),
+    log: (line) => logDriver(`[second] ${line}`),
+    listen: false,
+    voiceGroup: 'second',
+  });
+  await report.step('harness', 'second test account logs in to Discord', async () => {
+    await second.login();
+    redactor.add('second-driver-user-id', second.userId);
+  });
 
   sut = new Sut({
     mode: cfg.sutMode,
@@ -370,6 +408,7 @@ async function main() {
       JELLYCHORD_ENABLE_DEBUG: '1',
       JELLYCHORD_DEBUG_SERVER: cfg.guildId,
       JELLYCHORD_E2E_DRIVER_ID: driver.userId,
+      JELLYCHORD_E2E_EXTRA_DRIVER_IDS: second.userId,
       JELLYCHORD_E2E_CHANNEL_ID: cfg.controlChannelId,
       JELLYCHORD_E2E_NONCE: nonce,
       JELLYCHORD_E2E_LOG_LEVEL: 'DEBUG',
@@ -445,10 +484,13 @@ try {
   if (sut) report.diagnostics.sutNotableLog = sut.notableLines();
   if (report.failedStep) report.diagnostics.discordStatus = await discordStatus();
 
-  // Leave nothing behind in the shared guild.
+  // Leave nothing behind in the shared guild. The second account goes first:
+  // stopping the bot can take a while, and a retry shouldn't find it in voice.
+  await second?.leaveVoice().catch(() => {});
   if (driver && sut && !sut.exit) await resetPlayer().catch(() => {});
   await sut?.stop().catch(() => {});
   await driver?.destroy().catch(() => {});
+  await second?.destroy().catch(() => {});
   const jellyfinLogs = jellyfin ? await jellyfin.logs() : '';
   await jellyfin?.stop();
 
