@@ -27,7 +27,7 @@ Logging
 '''
 # The E2E hook's log level takes precedence: once logging is configured
 # here, the hook's own basicConfig() call is a no-op.
-LOG_LEVEL = str(os.getenv('JELLYCHORD_E2E_LOG_LEVEL') or config.get('log-level') or 'INFO').upper()
+LOG_LEVEL = str(os.getenv('JELLYCHORD_E2E_LOG_LEVEL') or config.get('log-level') or 'INFO').strip().upper()
 logging.basicConfig(
     level=logging.getLevelNamesMapping().get(LOG_LEVEL, logging.INFO),
     format='%(asctime)s %(levelname)s %(name)s: %(message)s',

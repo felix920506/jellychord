@@ -47,10 +47,35 @@ def _toInt(value):
         return None
     if isinstance(value, int):
         return value
+    # YAML reads "100.0" as a float; whole numbers were accepted before
+    if isinstance(value, float):
+        return int(value) if value.is_integer() else None
     try:
         return int(str(value).strip())
     except ValueError:
         return None
+
+
+TRUE_WORDS = ('true', 'yes', 'on', '1')
+FALSE_WORDS = ('false', 'no', 'off', '0')
+
+
+def _toFlag(value):
+    """A config.yml on/off setting as a bool, or None if it isn't one.
+
+    Unquoted true/yes/on are already bools from YAML. Quoted words are read
+    the same way, so "false" means off rather than being a truthy string.
+    Numbers keep their truthiness as before.
+    """
+    if isinstance(value, (bool, int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        word = value.strip().lower()
+        if word in TRUE_WORDS:
+            return True
+        if word in FALSE_WORDS:
+            return False
+    return None
 
 
 def _readFile(path: str) -> dict:
@@ -91,6 +116,13 @@ def load_config(environ=None, path: str = CONFIG_FILE) -> dict:
             config[key] = default
 
     problems = []
+    if fromFile:
+        for key in ('enable-debug', 'fairplay'):
+            flag = _toFlag(config[key])
+            if flag is None:
+                problems.append(f'{name(key)} must be true or false, got {config[key]!r}')
+            config[key] = bool(flag)
+
     missing = [name(key) for key in REQUIRED if _isUnset(config.get(key))]
     if missing:
         problems.append(f'missing required setting(s): {", ".join(missing)}')

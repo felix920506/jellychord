@@ -112,6 +112,52 @@ class FileConfigTests(ImportMainTestCase):
     def test_non_numeric_search_limit_is_rejected(self):
         self.assert_config_exit({}, FILE_REQUIRED + "search-limit: lots\n", "search-limit")
 
+    def test_whole_float_search_limit_is_accepted(self):
+        main = self.import_main({}, FILE_REQUIRED + "search-limit: 10.0\n")
+        self.assertEqual(main.LIMIT, 10)
+        self.assertIsInstance(main.LIMIT, int)
+
+    def test_large_float_search_limit_is_clamped(self):
+        main = self.import_main({}, FILE_REQUIRED + "search-limit: 100.0\n")
+        self.assertEqual(main.LIMIT, 25)
+
+    def test_quoted_search_limit_is_accepted(self):
+        main = self.import_main({}, FILE_REQUIRED + 'search-limit: "10"\n')
+        self.assertEqual(main.LIMIT, 10)
+
+    def test_fractional_or_boolean_search_limit_is_rejected(self):
+        for value in ("10.5", "true"):
+            with self.subTest(value=value):
+                self.assert_config_exit({}, FILE_REQUIRED + f"search-limit: {value}\n", "search-limit")
+
+    def test_flag_words_are_read_as_booleans(self):
+        cases = {
+            "true": True, "yes": True, "on": True, "1": True, "2": True,
+            "false": False, "no": False, "off": False, "0": False,
+            '"true"': True, '"Yes"': True, '"ON"': True, '"1"': True, '" true "': True,
+            '"false"': False, '"No"': False, '"off"': False, '"0"': False, '"FALSE"': False,
+        }
+        for value, expected in cases.items():
+            with self.subTest(value=value):
+                main = self.import_main({}, FILE_REQUIRED + f"fairplay: {value}\nenable-debug: {value}\ndebug-server: 1234\n")
+                self.assertIs(main.config["fairplay"], expected)
+                self.assertIs(main.DEBUG, expected)
+
+    def test_quoted_false_debug_needs_no_server(self):
+        main = self.import_main({}, FILE_REQUIRED + 'enable-debug: "false"\n')
+        self.assertFalse(main.DEBUG)
+        self.assertEqual(main.bot.groups, [(("jellychord",), {})])
+
+    def test_unknown_flag_value_is_rejected(self):
+        message = self.assert_config_exit({}, FILE_REQUIRED + "fairplay: sometimes\nenable-debug: [1]\n",
+                                          "fairplay", "enable-debug")
+        self.assertNotIn("debug-server", message)
+
+    def test_log_level_is_stripped(self):
+        with self.assertNoLogs("jellychord", "WARNING"):
+            main = self.import_main({}, FILE_REQUIRED + 'log-level: " debug "\n')
+        self.assertEqual(main.LOG_LEVEL, "DEBUG")
+
     def test_missing_file_is_a_clear_error(self):
         with self.assertRaises(SystemExit) as cm:
             self.import_main({})
@@ -157,6 +203,10 @@ class EnvConfigTests(ImportMainTestCase):
     def test_non_numeric_search_limit_is_rejected(self):
         env = {**ENV_REQUIRED, "JELLYCHORD_SEARCH_LIMIT": "lots"}
         self.assert_config_exit(env, None, "JELLYCHORD_SEARCH_LIMIT")
+
+    def test_log_level_is_stripped(self):
+        main = self.import_main({**ENV_REQUIRED, "JELLYCHORD_LOG_LEVEL": " debug "})
+        self.assertEqual(main.LOG_LEVEL, "DEBUG")
 
     def test_all_problems_are_reported_together(self):
         env = {"JELLYCHORD_USE_CONF_FILE": "0", "JELLYCHORD_SEARCH_LIMIT": "lots", "JELLYCHORD_ENABLE_DEBUG": "1"}

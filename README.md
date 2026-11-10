@@ -87,6 +87,8 @@ The same settings are read from `config.yml`, or from environment variables when
 | `enable-debug` | `JELLYCHORD_ENABLE_DEBUG` (`1` to enable) | off |
 | `debug-server` | `JELLYCHORD_DEBUG_SERVER` | required when debug mode is on |
 
+In `config.yml`, `fairplay` and `enable-debug` take `true`/`false` (also `yes`/`no`, `on`/`off`, `1`/`0`, quoted or not).
+
 If a required setting is missing or a setting has an invalid value, the bot exits at startup with a message naming the setting(s).
 
 ## Commands
