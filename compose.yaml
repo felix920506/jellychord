@@ -1,5 +1,7 @@
 services:
   jellychord:
+    # `latest` follows main. To pin or roll back, use a release tag (e.g. `0.1.0`)
+    # or a commit tag (e.g. `sha-1de0eab`); see "Image tags" in README.md.
     image: ghcr.io/felix920506/jellychord:latest
     environment:
       JELLYCHORD_DC_TOKEN: discord_token_here
