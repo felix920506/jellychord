@@ -272,20 +272,27 @@ async def _advanceTrack(guild: discord.Guild):
             return
 
         log.info('Playing %s (%s) in guild %s', entry['Name'], entry['Id'], guild.id)
-        url = JF_APICLIENT.getAudioHls(entry["Id"], vc.channel.bitrate)
         # Commands keep running while ffmpeg starts. A skip, /stop or
         # when=now in that window sets loading[guild.id], so this track is dropped.
         loading[guild.id] = False
+        loadError = None
         try:
+            url = JF_APICLIENT.getAudioHls(entry["Id"], vc.channel.bitrate)
             audio = await asyncio.to_thread(loadAudio, url)
-        except Exception:
-            failures += 1
-            log.exception('Failed to start the next track in guild %s (attempt %d/%d)',
-                          guild.id, failures, MAX_START_ATTEMPTS)
-            continue
+        except Exception as exc:
+            loadError = exc
         finally:
             skipped = loading.pop(guild.id)
 
+        if loadError is not None:
+            if skipped:
+                # skipped anyway, so it doesn't count towards giving up
+                log.warning('Skipped track %s in guild %s failed to load', entry["Id"], guild.id, exc_info=loadError)
+            else:
+                failures += 1
+                log.error('Failed to start the next track in guild %s (attempt %d/%d)',
+                          guild.id, failures, MAX_START_ATTEMPTS, exc_info=loadError)
+            continue
         if skipped or guild.voice_client is not vc or not vc.is_connected():
             audio.cleanup()
             continue
@@ -299,6 +306,12 @@ async def _advanceTrack(guild: discord.Guild):
         except Exception:
             # The player never took ownership of the source, so stop ffmpeg here.
             audio.cleanup()
+            if vc.is_playing() or vc.is_paused():
+                # py-cord stores the player before starting its thread; if
+                # starting it failed, that player never runs or calls after=.
+                # Only this coroutine starts players (under the lock), so it is
+                # ours: clear it so the next attempt isn't mistaken for playing.
+                vc.stop()
             failures += 1
             log.exception('Failed to start the next track in guild %s (attempt %d/%d)',
                           guild.id, failures, MAX_START_ATTEMPTS)
