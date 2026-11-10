@@ -2074,5 +2074,340 @@ class VoiceOutageTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(voice_client.is_paused())
 
 
+class FakeChannel:
+    """A voice channel whose connect() makes a new FakeVoiceClient the
+    guild's voice client, like py-cord."""
+
+    def __init__(self, guild, bitrate=96_000):
+        self.guild = guild
+        self.bitrate = bitrate
+        self.clients = []
+
+    async def connect(self):
+        voice_client = FakeVoiceClient(bitrate=self.bitrate)
+        voice_client.channel = self
+        voice_client.guild = self.guild
+        self.guild.voice_client = voice_client
+        self.clients.append(voice_client)
+        return voice_client
+
+
+class SlowLeaveVoiceClient(FakeVoiceClient):
+    """disconnect() blocks until release_disconnect(), like py-cord waiting
+    (up to 60s) for Discord to confirm the leave. The voice client stays the
+    guild's voice client until then."""
+
+    def __init__(self, channel, disconnect_error=None, **kwargs):
+        super().__init__(**kwargs)
+        self.channel = channel
+        self.guild = channel.guild
+        self.disconnect_error = disconnect_error
+        self.disconnect_started = asyncio.Event()
+        self._release = asyncio.Event()
+
+    def release_disconnect(self):
+        self._release.set()
+
+    async def disconnect(self, force=False):
+        self.disconnect_started.set()
+        await self._release.wait()
+        if self.disconnect_error is not None:
+            raise self.disconnect_error
+        await super().disconnect(force)
+
+
+class LiveContext:
+    """Like py-cord's ApplicationContext, voice_client is the guild's current one."""
+
+    def __init__(self, guild, author_id=100, channel=None):
+        self.guild = guild
+        self.guild_id = guild.id
+        self.author = types.SimpleNamespace(
+            id=author_id, voice=types.SimpleNamespace(channel=channel) if channel else None
+        )
+        self.responses = []
+        self.deferred = False
+
+    @property
+    def voice_client(self):
+        return self.guild.voice_client
+
+    async def respond(self, content=None, **kwargs):
+        self.responses.append(content)
+
+    async def defer(self, **kwargs):
+        self.deferred = True
+
+
+class PlayDuringLeaveTests(unittest.IsolatedAsyncioTestCase):
+    """/play, a search pick or /start while the bot is leaving voice waits
+    for the leave to finish, then starts a new session (#62)."""
+
+    BOT_ID = 999
+
+    @classmethod
+    def setUpClass(cls):
+        cls.main = import_main_with_stubs()
+
+    def setUp(self):
+        for state in (self.main.queues, self.main.playing, self.main.loading, self.main.playerLocks,
+                      self.main.expectedDisconnects, self.main.voiceEpochs, self.main.currentPlayers,
+                      self.main.leaving):
+            state.clear()
+        self.main.config["fairplay"] = False
+        self.main.JF_APICLIENT = FakeJFAPI()
+        self.main.bot.user = types.SimpleNamespace(id=self.BOT_ID)
+        self.patch_constant("VOICE_POLL_INTERVAL", 0.005)
+        self.guild = types.SimpleNamespace(id=42, voice_client=None)
+        self.old_channel = FakeChannel(self.guild)
+        self.invoker_channel = FakeChannel(self.guild)
+        # Cleanups run last-in first-out: this runs after the ones that let
+        # blocked disconnects finish, even if the test failed.
+        self.addAsyncCleanup(self.assert_nothing_left)
+
+    def patch_constant(self, name, value):
+        patch = mock.patch.object(self.main, name, value)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    async def assert_nothing_left(self):
+        # nothing is left waiting on a leave, or playing it out
+        await self.wait_for(lambda: len(asyncio.all_tasks()) == 1)
+        self.assertEqual(self.main.leaving, {})
+
+    async def wait_for(self, predicate, timeout=5):
+        async with asyncio.timeout(timeout):
+            while not predicate():
+                await asyncio.sleep(0.01)
+
+    def slow_leave_client(self, **kwargs):
+        voice_client = SlowLeaveVoiceClient(self.old_channel, **kwargs)
+        self.addCleanup(voice_client.release_disconnect)
+        self.guild.voice_client = voice_client
+        return voice_client
+
+    async def leaving_after_last_track(self, **kwargs):
+        """Play "first", let it end, and return its voice client once the bot
+        has started (but not finished) leaving voice."""
+        voice_client = self.slow_leave_client(**kwargs)
+        self.main.queues[42] = [queue_entry("first")]
+        await self.main.advanceTrack(self.guild)
+        voice_client.finish_track()
+        await self.wait_for(voice_client.disconnect_started.is_set)
+        return voice_client
+
+    async def run_play(self, ctx, track_id="late", when="last"):
+        with mock.patch.object(self.main, "searchHelper", mock.AsyncMock(return_value=[raw_track(track_id)])):
+            await self.main.play(ctx, track_id, None, when)
+
+    async def assert_waiting(self, task):
+        await asyncio.sleep(0.05)
+        self.assertFalse(task.done())
+        self.assertEqual(self.invoker_channel.clients, [])
+
+    async def finish_leave(self, voice_client):
+        voice_client.release_disconnect()
+        await self.wait_for(lambda: not self.main.playerLocks[42].locked() and 42 not in self.main.leaving)
+
+    def new_session(self):
+        self.assertEqual(len(self.invoker_channel.clients), 1)
+        return self.invoker_channel.clients[0]
+
+    async def test_play_during_final_leave_plays_after_leaving(self):
+        old_client = await self.leaving_after_last_track()
+        ctx = LiveContext(self.guild, channel=self.invoker_channel)
+
+        play = asyncio.create_task(self.run_play(ctx))
+        await self.assert_waiting(play)
+        await self.finish_leave(old_client)
+        await play
+
+        self.assertEqual(ctx.responses, ["Playing Track: Artist - late"])
+        # rejoins the invoker's channel, not the one it just left
+        self.assertEqual(self.old_channel.clients, [])
+        new_client = self.new_session()
+        self.assertIs(self.guild.voice_client, new_client)
+        self.assertEqual(len(new_client.play_calls), 1)
+        self.assertEqual(self.main.playing[42]["Id"], "late")
+        self.assertNotIn(42, self.main.queues)
+        self.assertEqual(len(old_client.play_calls), 1)
+
+    async def test_play_now_during_final_leave_plays_it_without_skipping(self):
+        old_client = await self.leaving_after_last_track()
+        self.main.queues[42] = [queue_entry("queued")]
+        ctx = LiveContext(self.guild, channel=self.invoker_channel)
+
+        play = asyncio.create_task(self.run_play(ctx, when="now"))
+        await self.assert_waiting(play)
+        await self.finish_leave(old_client)
+        await play
+
+        new_client = self.new_session()
+        self.assertFalse(new_client.stopped)
+        self.assertEqual(self.main.playing[42]["Id"], "late")
+        self.assertEqual(queue_ids(self.main.queues[42]), ["queued"])
+
+    async def test_search_pick_during_final_leave_plays_after_leaving(self):
+        old_client = await self.leaving_after_last_track()
+        ctx = LiveContext(self.guild, channel=self.invoker_channel)
+
+        pick = asyncio.create_task(self.main.playHelperGeneric(raw_track("picked"), ctx, "last"))
+        await self.assert_waiting(pick)
+        # queued right away, so /queue shows it during the leave
+        self.assertEqual(queue_ids(self.main.queues[42]), ["picked"])
+        await self.finish_leave(old_client)
+        await pick
+
+        self.assertEqual(len(self.new_session().play_calls), 1)
+        self.assertEqual(self.main.playing[42]["Id"], "picked")
+
+    async def test_play_during_final_leave_from_outside_voice_is_refused(self):
+        old_client = await self.leaving_after_last_track()
+        ctx = LiveContext(self.guild, channel=None)
+
+        play = asyncio.create_task(self.run_play(ctx))
+        await self.assert_waiting(play)
+        await self.finish_leave(old_client)
+        await play
+
+        # the old voice client doesn't count: same reply as right after the leave
+        self.assertEqual(ctx.responses, ["You are not in any voice channel"])
+        self.assertNotIn(42, self.main.queues)
+        self.assertIsNone(self.guild.voice_client)
+
+    async def test_start_during_final_leave_starts_playback(self):
+        old_client = await self.leaving_after_last_track()
+        self.main.queues[42] = [queue_entry("queued")]
+        ctx = LiveContext(self.guild, channel=self.invoker_channel)
+
+        start = asyncio.create_task(self.main.start(ctx))
+        await self.assert_waiting(start)
+        # the leave can outlast Discord's 3s reply deadline
+        self.assertTrue(ctx.deferred)
+        await self.finish_leave(old_client)
+        await start
+
+        self.assertEqual(ctx.responses, ["Starting Playback"])
+        self.assertEqual(len(self.new_session().play_calls), 1)
+        self.assertEqual(self.main.playing[42]["Id"], "queued")
+
+    async def test_start_when_not_leaving_does_not_defer(self):
+        ctx = LiveContext(self.guild, channel=self.invoker_channel)
+        self.main.queues[42] = [queue_entry("queued")]
+
+        await self.main.start(ctx)
+
+        self.assertFalse(ctx.deferred)
+        self.assertEqual(ctx.responses, ["Starting Playback"])
+        self.assertEqual(self.main.playing[42]["Id"], "queued")
+
+    async def test_stop_during_final_leave_drops_waiting_play(self):
+        old_client = await self.leaving_after_last_track()
+        ctx = LiveContext(self.guild, channel=self.invoker_channel)
+
+        pick = asyncio.create_task(self.main.playHelperGeneric(raw_track("picked"), ctx, "last"))
+        await self.assert_waiting(pick)
+        await self.main.stop(ctx)
+        await self.finish_leave(old_client)
+        await pick
+
+        self.assertEqual(ctx.responses, ["Stopping playback"])
+        self.assertEqual(self.invoker_channel.clients, [])
+        self.assertIsNone(self.guild.voice_client)
+        self.assertNotIn(42, self.main.queues)
+
+    async def test_kick_during_final_leave_keeps_requested_track(self):
+        old_client = await self.leaving_after_last_track()
+        ctx = LiveContext(self.guild, channel=self.invoker_channel)
+
+        # a pick queues right away, before waiting for the leave
+        pick = asyncio.create_task(self.main.playHelperGeneric(raw_track("late"), ctx, "last"))
+        await self.assert_waiting(pick)
+        # A leave event during the bot's own leave counts as that leave, so
+        # the requested track isn't cleared.
+        await self.main.onVoiceStateUpdate(
+            types.SimpleNamespace(id=self.BOT_ID, guild=self.guild),
+            types.SimpleNamespace(channel=self.old_channel),
+            types.SimpleNamespace(channel=None),
+        )
+        self.assertEqual(queue_ids(self.main.queues[42]), ["late"])
+        await self.finish_leave(old_client)
+        await pick
+
+        self.assertEqual(len(self.new_session().play_calls), 1)
+        self.assertEqual(self.main.playing[42]["Id"], "late")
+
+    async def test_play_during_give_up_leave_plays_after_leaving(self):
+        attempts = self.main.MAX_START_ATTEMPTS
+        old_client = self.slow_leave_client(play_failures=attempts)
+        self.main.queues[42] = [queue_entry(f"broken-{i}") for i in range(attempts)] + [queue_entry("leftover")]
+        ctx = LiveContext(self.guild, channel=self.invoker_channel)
+
+        with self.assertLogs("jellychord", "ERROR"):
+            advance = asyncio.create_task(self.main.advanceTrack(self.guild))
+            await self.wait_for(old_client.disconnect_started.is_set)
+            play = asyncio.create_task(self.run_play(ctx))
+            await self.assert_waiting(play)
+            await self.finish_leave(old_client)
+            await asyncio.gather(advance, play)
+
+        # same as /play right after giving up: the kept queue plays first
+        self.assertEqual(ctx.responses, ["Playing Track: Artist - late"])
+        self.assertEqual(len(self.new_session().play_calls), 1)
+        self.assertEqual(self.main.playing[42]["Id"], "leftover")
+        self.assertEqual(queue_ids(self.main.queues[42]), ["late"])
+
+    async def test_give_up_leave_does_not_rejoin_on_its_own(self):
+        attempts = self.main.MAX_START_ATTEMPTS
+        old_client = self.slow_leave_client(play_failures=attempts)
+        self.main.queues[42] = [queue_entry(f"broken-{i}") for i in range(attempts)] + [queue_entry("leftover")]
+
+        with self.assertLogs("jellychord", "ERROR"):
+            advance = asyncio.create_task(self.main.advanceTrack(self.guild))
+            await self.wait_for(old_client.disconnect_started.is_set)
+            await self.finish_leave(old_client)
+            await advance
+
+        self.assertIsNone(self.guild.voice_client)
+        self.assertEqual(self.old_channel.clients, [])
+        self.assertEqual(queue_ids(self.main.queues[42]), ["leftover"])
+
+    async def test_play_during_outage_give_up_leave_plays_after_leaving(self):
+        self.patch_constant("VOICE_OUTAGE_TIMEOUT", 0.05)
+        old_client = self.slow_leave_client()
+        self.main.queues[42] = [queue_entry("first"), queue_entry("second")]
+        await self.main.advanceTrack(self.guild)
+        ctx = LiveContext(self.guild, channel=self.invoker_channel)
+
+        old_client.drop_connection()
+        with self.assertLogs("jellychord", "WARNING"):
+            old_client.player_times_out()
+            await self.wait_for(old_client.disconnect_started.is_set)
+        play = asyncio.create_task(self.run_play(ctx))
+        await self.assert_waiting(play)
+        await self.finish_leave(old_client)
+        await play
+
+        self.assertEqual(ctx.responses, ["Playing Track: Artist - late"])
+        self.assertEqual(len(self.new_session().play_calls), 1)
+        self.assertEqual(self.main.playing[42]["Id"], "second")
+        self.assertEqual(queue_ids(self.main.queues[42]), ["late"])
+
+    async def test_failed_leave_releases_waiting_play(self):
+        old_client = await self.leaving_after_last_track(disconnect_error=RuntimeError("disconnect failed"))
+        ctx = LiveContext(self.guild, channel=self.invoker_channel)
+
+        pick = asyncio.create_task(self.main.playHelperGeneric(raw_track("picked"), ctx, "last"))
+        await self.assert_waiting(pick)
+        with self.assertLogs("jellychord", "ERROR"):
+            await self.finish_leave(old_client)
+        await pick
+
+        # still connected, so the track is only queued, as before
+        self.assertIs(self.guild.voice_client, old_client)
+        self.assertEqual(self.invoker_channel.clients, [])
+        self.assertEqual(queue_ids(self.main.queues[42]), ["picked"])
+
+
 if __name__ == "__main__":
     unittest.main()

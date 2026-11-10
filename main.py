@@ -96,6 +96,10 @@ VOICE_OUTAGE_TIMEOUT = 120
 # callback passes the token back, so advanceTrack can tell that this player's
 # thread has exited even if py-cord still reports it as playing.
 currentPlayers = {}
+# guild id -> asyncio.Event, present while stopPlayback is leaving voice and set
+# once it has left. guild.voice_client stays set until the disconnect finishes,
+# so commands that would start a player wait on this first (waitUntilLeft).
+leaving = {}
 
 bot = discord.Bot()
 
@@ -163,9 +167,13 @@ async def playHelperGeneric(item: dict, ctx: discord.ApplicationContext, positio
         else:
             queues[ctx.guild_id][ctx.author.id][0:0] = entries
 
-    
+
+    # If the bot is leaving voice right now, the voice client it still has is
+    # about to go away: wait, then start a new session like after the leave.
+    await waitUntilLeft(ctx.guild_id)
     if not ctx.voice_client:
-        await startPlayer(ctx)
+        if pruneEmptyQueues(ctx.guild_id):  # not emptied (/stop) while waiting
+            await startPlayer(ctx)
     elif position == 'now':
         skipCurrentTrack(ctx.guild)
 
@@ -481,9 +489,19 @@ def cancelVoiceReconnect(vc):
     except Exception:
         log.debug('Could not cancel the voice reconnect task', exc_info=True)
 
+async def waitUntilLeft(guildId: int):
+    """If stopPlayback is leaving voice in this guild, wait until it is done.
+    Doesn't yield otherwise, so callers can check the queue and voice client
+    in the same step."""
+    while (left := leaving.get(guildId)) is not None:
+        await left.wait()
+
 async def stopPlayback(guild: discord.Guild, vc):
     """Forget the current track and leave the voice channel. Tracks still
-    queued are kept, so /start can pick them up."""
+    queued are kept, so /start can pick them up. /play and /start during the
+    leave wait for it to finish (waitUntilLeft) and then start a new session."""
+    # Before any await, so a command can't see the old voice client without it.
+    left = leaving[guild.id] = asyncio.Event()
     playing.pop(guild.id, None)
     currentPlayers.pop(guild.id, None)
     # tell onVoiceStateUpdate this leave is ours, so it keeps the queue
@@ -502,6 +520,10 @@ async def stopPlayback(guild: discord.Guild, vc):
     else:
         if guild.id in expectedDisconnects:
             expectedDisconnects[guild.id] = time.monotonic() + EXPECTED_LEAVE_GRACE
+    finally:
+        if leaving.get(guild.id) is left:
+            leaving.pop(guild.id)
+        left.set()
 
 def clearGuildState(guildId: int):
     queues.pop(guildId, None)
@@ -790,6 +812,8 @@ async def play(ctx: discord.ApplicationContext,
     
     await ctx.defer(invisible=True)
     res = await searchHelper(term, limit=1, searchType=searchtype)
+    # A voice client that is about to go away doesn't count (see stopPlayback).
+    await waitUntilLeft(ctx.guild_id)
 
     if not res:
         await ctx.respond('No items match your query')
@@ -829,6 +853,11 @@ async def queue(ctx: discord.ApplicationContext):
 
 @cmdgrp.command()
 async def start(ctx: discord.ApplicationContext):
+    if ctx.guild_id in leaving:
+        # The voice client it still has is about to go away (see stopPlayback).
+        # The leave can take up to py-cord's disconnect timeout, so defer.
+        await ctx.defer()
+        await waitUntilLeft(ctx.guild_id)
     if ctx.guild_id in queues and ctx.author.voice and not ctx.voice_client:
         await ctx.respond('Starting Playback')
         await startPlayer(ctx)
