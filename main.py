@@ -125,8 +125,7 @@ def getItemEntry(item: dict) -> dict:
         "Length": item['RunTimeTicks'] // 10000000
     }
 
-async def playHelperGeneric(item: dict, ctx: discord.ApplicationContext, position: str,
-                            waitedForLeave: bool = False):
+async def playHelperGeneric(item: dict, ctx: discord.ApplicationContext, position: str):
     entries = []
     if item["Type"] == "MusicAlbum":
         tracks = await JF_APICLIENT.getAlbumTracks(item['Id'])
@@ -171,15 +170,21 @@ async def playHelperGeneric(item: dict, ctx: discord.ApplicationContext, positio
 
     # If the bot is leaving voice right now, the voice client it still has is
     # about to go away: wait, then start a new session like after the leave.
-    waited = await waitUntilLeft(ctx.guild_id) or waitedForLeave
+    await waitUntilLeft(ctx.guild_id)
     if not ctx.voice_client:
         if pruneEmptyQueues(ctx.guild_id):  # not emptied (/stop) while waiting
             await startPlayer(ctx)
-    elif position == 'now' and not waited:
-        # After a wait, the track 'now' meant to interrupt left with the old
-        # session. A voice client now is a new session (another waiter joined
-        # first), which starts from the front of the queue, so don't skip.
-        skipCurrentTrack(ctx.guild)
+    elif position == 'now':
+        # Skip whatever is playing (or loading) now, unless it is one of this
+        # request's own tracks: after waiting for a leave, a new session may
+        # already have started from the front of the queue, where they are.
+        # Queue entries are distinct dicts and the popped one becomes the
+        # playing entry, so identity tells them apart even for duplicates.
+        # (While a new session is still connecting nothing is selected yet,
+        # so the skip has nothing to stop; it then starts from the front.)
+        current = playing.get(ctx.guild_id)
+        if not any(current is e for e in entries):
+            skipCurrentTrack(ctx.guild)
 
 async def startPlayer(ctx: discord.ApplicationContext):
     vc = ctx.voice_client
@@ -493,15 +498,12 @@ def cancelVoiceReconnect(vc):
     except Exception:
         log.debug('Could not cancel the voice reconnect task', exc_info=True)
 
-async def waitUntilLeft(guildId: int) -> bool:
+async def waitUntilLeft(guildId: int):
     """If stopPlayback is leaving voice in this guild, wait until it is done.
     Doesn't yield otherwise, so callers can check the queue and voice client
-    in the same step. Returns True if it waited."""
-    waited = False
+    in the same step."""
     while (left := leaving.get(guildId)) is not None:
-        waited = True
         await left.wait()
-    return waited
 
 async def stopPlayback(guild: discord.Guild, vc):
     """Forget the current track and leave the voice channel. Tracks still
@@ -820,7 +822,7 @@ async def play(ctx: discord.ApplicationContext,
     await ctx.defer(invisible=True)
     res = await searchHelper(term, limit=1, searchType=searchtype)
     # A voice client that is about to go away doesn't count (see stopPlayback).
-    waited = await waitUntilLeft(ctx.guild_id)
+    await waitUntilLeft(ctx.guild_id)
 
     if not res:
         await ctx.respond('No items match your query')
@@ -828,7 +830,7 @@ async def play(ctx: discord.ApplicationContext,
         await ctx.respond('You are not in any voice channel')
     else:
         await ctx.respond(f'Playing {getTrackString(res[0], showType=True)}')
-        await playHelperGeneric(res[0], ctx, when, waitedForLeave=waited)
+        await playHelperGeneric(res[0], ctx, when)
 
 @cmdgrp.command()
 async def skip(ctx: discord.ApplicationContext):

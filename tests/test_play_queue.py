@@ -2144,6 +2144,23 @@ class LiveContext:
         self.deferred = True
 
 
+class SlowRespondContext(LiveContext):
+    """respond() is held until release_respond(), like a slow Discord HTTP call."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.respond_started = asyncio.Event()
+        self._release = asyncio.Event()
+
+    def release_respond(self):
+        self._release.set()
+
+    async def respond(self, content=None, **kwargs):
+        self.respond_started.set()
+        await self._release.wait()
+        await super().respond(content, **kwargs)
+
+
 class PlayDuringLeaveTests(unittest.IsolatedAsyncioTestCase):
     """/play, a search pick or /start while the bot is leaving voice waits
     for the leave to finish, then starts a new session (#62)."""
@@ -2269,7 +2286,7 @@ class PlayDuringLeaveTests(unittest.IsolatedAsyncioTestCase):
         # The new session starts with the urgent track; its own waiter must
         # not skip it (what it would have interrupted left with the old session).
         new_client = self.new_session()
-        self.assertFalse(new_client.stopped)
+        self.assertTrue(new_client.is_playing())
         self.assertEqual(len(new_client.play_calls), 1)
         self.assertEqual(self.main.playing[42]["Id"], "urgent-pick")
         self.assertEqual(queue_ids(self.main.queues[42]), ["first-pick"])
@@ -2287,10 +2304,112 @@ class PlayDuringLeaveTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.gather(first, urgent)
 
         new_client = self.new_session()
-        self.assertFalse(new_client.stopped)
+        self.assertTrue(new_client.is_playing())
         self.assertEqual(len(new_client.play_calls), 1)
         played = [self.main.playing[42]["Id"]] + queue_ids(self.main.queues[42])
         self.assertCountEqual(played, ["first-pick", "urgent"])
+
+    def wake_late(self, *tasks):
+        """Delay these tasks after waitUntilLeft returns until the new session
+        is playing, as if the event loop got to them late."""
+        real = self.main.waitUntilLeft
+
+        async def wait_until_left(guild_id):
+            await real(guild_id)
+            if asyncio.current_task() in tasks:
+                await self.wait_for(lambda: self.guild.voice_client is not None
+                                    and self.guild.voice_client.is_playing())
+
+        patch = mock.patch.object(self.main, "waitUntilLeft", wait_until_left)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    async def test_now_pick_whose_track_is_already_playing_is_not_skipped(self):
+        old_client = await self.leaving_after_last_track()
+        ctx = LiveContext(self.guild, channel=self.invoker_channel)
+
+        first = asyncio.create_task(self.main.playHelperGeneric(raw_track("first-pick"), ctx, "last"))
+        await self.assert_waiting(first)
+        urgent = asyncio.create_task(self.main.playHelperGeneric(raw_track("urgent-pick"), ctx, "now"))
+        self.wake_late(urgent)
+        await self.assert_waiting(urgent)
+        await self.finish_leave(old_client)
+        await asyncio.gather(first, urgent)
+
+        # the new session already plays urgent's own entry when it checks
+        new_client = self.new_session()
+        self.assertTrue(new_client.is_playing())
+        self.assertEqual(len(new_client.play_calls), 1)
+        self.assertEqual(self.main.playing[42]["Id"], "urgent-pick")
+        self.assertEqual(queue_ids(self.main.queues[42]), ["first-pick"])
+
+    async def test_now_album_whose_first_track_is_already_playing_is_not_skipped(self):
+        self.main.JF_APICLIENT = FakeJFAPI(album_tracks={"album": [raw_track("a1"), raw_track("a2")]})
+        old_client = await self.leaving_after_last_track()
+        ctx = LiveContext(self.guild, channel=self.invoker_channel)
+
+        first = asyncio.create_task(self.main.playHelperGeneric(raw_track("first-pick"), ctx, "last"))
+        await self.assert_waiting(first)
+        album = asyncio.create_task(self.main.playHelperGeneric({"Type": "MusicAlbum", "Id": "album"}, ctx, "now"))
+        self.wake_late(album)
+        await self.assert_waiting(album)
+        await self.finish_leave(old_client)
+        await asyncio.gather(first, album)
+
+        new_client = self.new_session()
+        self.assertTrue(new_client.is_playing())
+        self.assertEqual(len(new_client.play_calls), 1)
+        self.assertEqual(self.main.playing[42]["Id"], "a1")
+        self.assertEqual(queue_ids(self.main.queues[42]), ["a2", "first-pick"])
+
+    async def play_now_after_slow_respond(self, other_id, fairplay=False):
+        """/play urgent when=now waits for the leave, then its reply is slow;
+        meanwhile a pick starts a new session playing other_id."""
+        old_client = await self.leaving_after_last_track()
+        self.assertNotIn(42, self.main.queues)
+        self.main.config["fairplay"] = fairplay
+        ctx = SlowRespondContext(self.guild, author_id=100, channel=self.invoker_channel)
+        other_ctx = LiveContext(self.guild, author_id=101, channel=self.invoker_channel)
+
+        play = asyncio.create_task(self.run_play(ctx, "urgent", when="now"))
+        await self.assert_waiting(play)
+        await self.finish_leave(old_client)
+        await self.wait_for(ctx.respond_started.is_set)
+
+        await self.main.playHelperGeneric(raw_track(other_id), other_ctx, "last")
+        new_client = self.new_session()
+        await self.wait_for(new_client.is_playing)
+        other = self.main.playing[42]
+        self.assertEqual(other["Id"], other_id)
+
+        ctx.release_respond()
+        await play
+        await self.wait_for(lambda: len(new_client.play_calls) == 2 and not self.main.playerLocks[42].locked())
+        return new_client, other
+
+    async def test_play_now_with_slow_reply_skips_track_started_meanwhile(self):
+        new_client, other = await self.play_now_after_slow_respond("other")
+
+        # when=now interrupts the unrelated track, as it would after the leave
+        self.assertTrue(new_client.is_playing())
+        self.assertEqual(self.main.playing[42]["Id"], "urgent")
+        self.assertNotIn(42, self.main.queues)
+
+    async def test_play_now_with_slow_reply_skips_same_track_started_meanwhile(self):
+        # the same track requested by someone else isn't this request's own
+        new_client, other = await self.play_now_after_slow_respond("urgent")
+
+        self.assertTrue(new_client.is_playing())
+        self.assertEqual(self.main.playing[42]["Id"], "urgent")
+        self.assertIsNot(self.main.playing[42], other)
+        self.assertNotIn(42, self.main.queues)
+
+    async def test_play_now_with_slow_reply_skips_track_started_meanwhile_fairplay(self):
+        new_client, other = await self.play_now_after_slow_respond("other", fairplay=True)
+
+        self.assertTrue(new_client.is_playing())
+        self.assertEqual(self.main.playing[42]["Id"], "urgent")
+        self.assertNotIn(42, self.main.queues)
 
     async def test_two_plays_waiting_on_one_leave_join_once(self):
         old_client = await self.leaving_after_last_track()
