@@ -71,6 +71,26 @@ Steps:
 9. run `poetry run python3 main.py` to start the bot. You may need to run `poetry run python main.py` if you are on Windows.
 10. Press `Ctrl+C` in the terminal window to exit the bot. MacOS uses the same key bind.
 
+### Settings
+
+The same settings are read from `config.yml`, or from environment variables when `JELLYCHORD_USE_CONF_FILE` is `0` (the docker image sets this).
+
+| `config.yml` key | Environment variable | Default |
+| --- | --- | --- |
+| `discord-token` | `JELLYCHORD_DC_TOKEN` | required |
+| `jf-server` | `JELLYCHORD_JF_SERVER` | required |
+| `jf-apikey` | `JELLYCHORD_JF_APIKEY` | required |
+| `command-group` | `JELLYCHORD_COMMAND_GROUP` | `jellychord` |
+| `search-limit` | `JELLYCHORD_SEARCH_LIMIT` | `25` (kept between 1 and 25) |
+| `fairplay` | `JELLYCHORD_ENABLE_FAIRPLAY` (`1` to enable) | off |
+| `log-level` | `JELLYCHORD_LOG_LEVEL` | `INFO` |
+| `enable-debug` | `JELLYCHORD_ENABLE_DEBUG` (`1` to enable) | off |
+| `debug-server` | `JELLYCHORD_DEBUG_SERVER` | required when debug mode is on |
+
+In `config.yml`, `fairplay` and `enable-debug` take `true`/`false` (also `yes`/`no`, `on`/`off`, `1`/`0`, quoted or not).
+
+If a required setting is missing or a setting has an invalid value, the bot exits at startup with a message naming the setting(s).
+
 ## Commands
 
 This list will assume the default prefix of `jellychord`. This can be changed in the config.

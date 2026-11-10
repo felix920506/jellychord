@@ -1,3 +1,4 @@
+import datetime
 import importlib
 import os
 import sys
@@ -11,12 +12,23 @@ def make_discord_stub():
     discord_ext = types.ModuleType("discord.ext")
 
     class FakeSelect:
+        # Like py-cord's Select, the user's choice is only exposed through the
+        # public values property (None until refresh_state has run). The
+        # private storage deliberately has a different name from py-cord's.
         def __init__(self, *args, **kwargs):
             self.options = []
             self.view = None
+            self._fake_selected = None
 
         def add_option(self, **kwargs):
             self.options.append(kwargs)
+
+        def refresh_state(self, data):
+            self._fake_selected = list(data.get("values", []))
+
+        @property
+        def values(self):
+            return self._fake_selected
 
     class FakeButton:
         def __init__(self, *args, **kwargs):
@@ -187,6 +199,58 @@ class MainHelperTests(unittest.IsolatedAsyncioTestCase):
             "Album: Various Artists - Compilation",
         )
         self.assertEqual(self.main.getTrackString(no_artist), "Untitled")
+
+    def test_get_item_entry_defaults_missing_artists_and_length(self):
+        self.assertEqual(
+            self.main.getItemEntry({"Name": "Track", "Id": "track-1"}),
+            {"Artists": [], "Name": "Track", "Id": "track-1", "Length": 0},
+        )
+        self.assertEqual(
+            self.main.getItemEntry({"Name": "Track", "Id": "track-1", "Artists": None, "RunTimeTicks": None}),
+            {"Artists": [], "Name": "Track", "Id": "track-1", "Length": 0},
+        )
+
+    def test_get_track_string_handles_missing_artists_and_length(self):
+        self.assertEqual(
+            self.main.getTrackString({"Type": "Audio", "Name": "Bare"}, showType=True, showSize=True),
+            "Track: Bare",
+        )
+        self.assertEqual(
+            self.main.getTrackString({"Type": "Audio", "Name": "Zero", "Artists": ["A"], "RunTimeTicks": 0},
+                                     showSize=True),
+            "A - Zero",
+        )
+        # queue entries carry Length instead of RunTimeTicks and no Type
+        self.assertEqual(self.main.getTrackString({"Name": "Entry", "Id": "e", "Artists": [], "Length": 0}), "Entry")
+
+    def playing_now(self, length, elapsed=75, **extra):
+        self.main.playing[42] = {
+            "Artists": ["Artist"],
+            "Name": "Song",
+            "Id": "song",
+            "paused": True,
+            "playtime-offset": datetime.timedelta(seconds=elapsed),
+            "starttime": datetime.datetime.now(),
+            **({} if length is None else {"Length": length}),
+            **extra,
+        }
+
+    async def nowplaying_reply(self):
+        ctx = types.SimpleNamespace(guild_id=42, respond=mock.AsyncMock())
+        await self.main.nowplaying(ctx)
+        return ctx.respond.await_args.args[0]
+
+    async def test_nowplaying_shows_elapsed_and_total(self):
+        self.playing_now(185)
+        self.assertEqual(await self.nowplaying_reply(), "Currently Playing: Artist - Song 01:15/03:05")
+
+    async def test_nowplaying_with_unknown_length(self):
+        self.playing_now(0)
+        self.assertEqual(await self.nowplaying_reply(), "Currently Playing: Artist - Song 01:15/--:--")
+
+    async def test_nowplaying_with_no_length_or_artists(self):
+        self.playing_now(None, Artists=[])
+        self.assertEqual(await self.nowplaying_reply(), "Currently Playing: Song 01:15/--:--")
 
     async def test_search_helper_maps_user_search_types_to_jellyfin_types(self):
         calls = []
