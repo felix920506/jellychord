@@ -1932,6 +1932,74 @@ class VoiceOutageTests(unittest.IsolatedAsyncioTestCase):
         await self.main.resume(ctx)
         self.assertTrue(voice_client.is_playing())
 
+    async def test_resume_while_carried_over_pause_track_fails_to_load_plays_next_unpaused(self):
+        voice_client, guild = await self.outage_with_stale_player(["first", "second", "third"])
+        ctx = self.context(guild)
+        load_started = threading.Event()
+        release = threading.Event()
+        self.addCleanup(release.set)
+        real_audio_class = self.main.discord.FFmpegOpusAudio
+
+        class FailingSecondAudio(real_audio_class):
+            def read(self):
+                if "/second?" in self.url:
+                    load_started.set()
+                    release.wait(5)
+                    raise OSError("stream unavailable")
+                return super().read()
+
+        patch = mock.patch.object(self.main.discord, "FFmpegOpusAudio", FailingSecondAudio)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+        await self.main.pause(ctx)
+        with self.assertLogs("jellychord", "WARNING") as logs:
+            voice_client.recover_connection()
+            await self.wait_for(load_started.is_set)
+            self.assertTrue(self.main.playing[42]["paused"])
+            await self.main.resume(ctx)
+            release.set()
+            await self.wait_for(lambda: len(voice_client.play_calls) == 2)
+
+        self.assertTrue(any("Failed to start the next track" in line for line in logs.output))
+        self.assertEqual(ctx.responses, ["Pausing playback", "Resuming playback"])
+        self.assertEqual(self.main.playing[42]["Id"], "third")
+        self.assertFalse(self.main.playing[42]["paused"])
+        self.assertTrue(voice_client.is_playing())
+
+    async def test_pause_while_track_fails_to_load_starts_next_track_paused(self):
+        voice_client, guild = await self.start(["first", "second", "third"])
+        ctx = self.context(guild)
+        load_started = threading.Event()
+        release = threading.Event()
+        self.addCleanup(release.set)
+        real_audio_class = self.main.discord.FFmpegOpusAudio
+
+        class FailingSecondAudio(real_audio_class):
+            def read(self):
+                if "/second?" in self.url:
+                    load_started.set()
+                    release.wait(5)
+                    raise OSError("stream unavailable")
+                return super().read()
+
+        patch = mock.patch.object(self.main.discord, "FFmpegOpusAudio", FailingSecondAudio)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+        with self.assertLogs("jellychord", "ERROR"):
+            voice_client.finish_track()
+            await self.wait_for(load_started.is_set)
+            await self.main.pause(ctx)
+            release.set()
+            await self.wait_for(lambda: len(voice_client.play_calls) == 2)
+
+        # "Pausing playback" was the reply, so the track played instead stays paused
+        self.assertEqual(ctx.responses, ["Pausing playback"])
+        self.assertEqual(self.main.playing[42]["Id"], "third")
+        self.assertTrue(self.main.playing[42]["paused"])
+        self.assertTrue(voice_client.is_paused())
+
 
 if __name__ == "__main__":
     unittest.main()

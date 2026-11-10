@@ -371,6 +371,9 @@ async def _advanceTrack(guild: discord.Guild, endedPlayer: object = None):
             return
         if startPaused:
             entry['paused'] = True
+            # Carried over now; from here the entry's own state is what counts,
+            # so a /resume while it loads isn't undone if it fails.
+            startPaused = False
 
         log.info('Playing %s (%s) in guild %s', entry['Name'], entry['Id'], guild.id)
         # Commands keep running while ffmpeg starts. A skip, /stop or
@@ -397,6 +400,9 @@ async def _advanceTrack(guild: discord.Guild, endedPlayer: object = None):
                 failures += 1
                 log.error('Failed to start the next track in guild %s (attempt %d/%d)',
                           guild.id, failures, MAX_START_ATTEMPTS, exc_info=loadError)
+                # The track never started, so keep it paused (or not) as it is
+                # now on the next one. A skip drops it, like skipping a paused track.
+                startPaused = entry['paused']
             continue
         if skipped or guild.voice_client is not vc or not vc.is_connected():
             if audio is not None:
@@ -422,6 +428,7 @@ async def _advanceTrack(guild: discord.Guild, endedPlayer: object = None):
             failures += 1
             log.exception('Failed to start the next track in guild %s (attempt %d/%d)',
                           guild.id, failures, MAX_START_ATTEMPTS)
+            startPaused = entry['paused']
             continue
         currentPlayers[guild.id] = player
         if entry['paused']:
