@@ -327,6 +327,26 @@ class PlayQueueTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(scheduled, ["disconnect-coroutine"])
         self.assertEqual(voice_client.disconnect_kwargs, {"force": True})
 
+    def test_fairplay_queue_still_lists_after_voice_connection_is_lost(self):
+        self.main.config["fairplay"] = True
+        voice_client = FakeVoiceClient()
+        guild = types.SimpleNamespace(id=42, voice_client=voice_client)
+        self.main.queues[42] = {100: [queue_entry("a1"), queue_entry("a2")], 200: [queue_entry("b1")]}
+
+        def play(audio, after):
+            raise RuntimeError("Not connected to voice")
+
+        voice_client.play = play
+        voice_client.connected = False
+
+        with mock.patch.object(self.main.asyncio, "run_coroutine_threadsafe", lambda coro, loop: None), \
+                self.assertLogs(self.main._log, "ERROR"):
+            self.main.playNextTrack(guild)
+
+        # The queue is kept but nothing is playing; /queue must not need a playing entry.
+        self.assertNotIn(42, self.main.playing)
+        self.assertEqual(queue_ids(self.main.getFlattenedPlayQueue(42)), ["a2", "b1"])
+
     def test_play_next_track_fairplay_wraps_to_first_user_after_last_user_finishes(self):
         self.main.config["fairplay"] = True
         voice_client = FakeVoiceClient()
@@ -442,6 +462,30 @@ class PauseResumeTests(unittest.IsolatedAsyncioTestCase):
             ctx.respond = respond
             await command(ctx)
             self.assertEqual(seen, [expected_paused])
+
+    async def test_pause_and_resume_survive_track_ending_during_check(self):
+        for command in (self.main.pause, self.main.resume):
+            voice_client = FakeVoiceClient()
+            self.start_track(voice_client)
+            if command is self.main.resume:
+                voice_client.paused = True
+                self.main.playing[42]["paused"] = True
+            is_playing, is_paused = voice_client.is_playing, voice_client.is_paused
+
+            def finish_track(check):
+                # The player thread can end the track (and clear `playing`)
+                # without any await on our side.
+                def wrapped():
+                    result = check()
+                    self.main.playing.pop(42, None)
+                    return result
+                return wrapped
+
+            voice_client.is_playing = finish_track(is_playing)
+            voice_client.is_paused = finish_track(is_paused)
+            ctx = FakeContext(voice_client=voice_client)
+            await command(ctx)
+            self.assertEqual(len(ctx.responses), 1)
 
     async def test_pause_and_resume_when_not_connected(self):
         for command in (self.main.pause, self.main.resume):

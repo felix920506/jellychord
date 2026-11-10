@@ -205,13 +205,18 @@ def startNextTrack(guild) -> bool:
         asyncio.run_coroutine_threadsafe(vc.disconnect(), vc.loop)
     return True
 
-def hasActiveTrack(ctx: discord.ApplicationContext) -> bool:
-    '''True if a track is loaded and the voice client is playing or paused it.
+def getActiveTrack(ctx: discord.ApplicationContext) -> dict | None:
+    '''The current track if the voice client is playing or paused it, else None.
 
-    False while connecting, between tracks, or while the next stream is starting up.
+    None while connecting, between tracks, or while the next stream is starting up.
+    The player thread can replace or remove `playing[guild]` at any moment, so
+    callers should work on the returned dict rather than looking it up again.
     '''
     vc = ctx.voice_client
-    return ctx.guild_id in playing and vc is not None and (vc.is_playing() or vc.is_paused())
+    track = playing.get(ctx.guild_id)
+    if track is None or vc is None or not (vc.is_playing() or vc.is_paused()):
+        return None
+    return track
 
 def getTrackString(item: dict, artistLimit: int = 1, showType: bool = False, showSize: bool = False):
 
@@ -253,7 +258,8 @@ def getFlattenedPlayQueue(guildId: int) -> list[dict]:
     if not config.get('fairplay'):
         return queues[guildId]
     else:
-        nextTrackUserIdx = playing[guildId].get('nextTrackUserIdx') % len(queues[guildId])
+        # nothing may be playing (e.g. after a lost connection); start from the first user
+        nextTrackUserIdx = playing.get(guildId, {}).get('nextTrackUserIdx', 0) % len(queues[guildId])
         userIds = list(queues[guildId].keys())
         orderedUserIds = userIds[nextTrackUserIdx:]+userIds[:nextTrackUserIdx]
         orderedTrackLists = [queues[guildId][uid] for uid in orderedUserIds]
@@ -459,17 +465,17 @@ async def start(ctx: discord.ApplicationContext):
 
 @cmdgrp.command()
 async def pause(ctx: discord.ApplicationContext):
-    global playing
     if ctx.voice_client:
-        if not hasActiveTrack(ctx):
+        track = getActiveTrack(ctx)
+        if track is None:
             await ctx.respond('Not currently playing')
-        elif playing[ctx.guild_id]['paused']:
+        elif track['paused']:
             await ctx.respond('Already paused')
         else:
             # update state before awaiting, so the track can't change underneath us
-            td = datetime.datetime.now() - playing[ctx.guild_id]['starttime']
-            playing[ctx.guild_id]['paused'] = True
-            playing[ctx.guild_id]['playtime-offset'] += td
+            td = datetime.datetime.now() - track['starttime']
+            track['paused'] = True
+            track['playtime-offset'] += td
             ctx.voice_client.pause()
             await ctx.respond('Pausing playback')
     else:
@@ -477,14 +483,14 @@ async def pause(ctx: discord.ApplicationContext):
 
 @cmdgrp.command()
 async def resume(ctx: discord.ApplicationContext):
-    global playing
     if ctx.voice_client:
-        if not hasActiveTrack(ctx):
+        track = getActiveTrack(ctx)
+        if track is None:
             await ctx.respond('Not currently playing')
-        elif playing[ctx.guild_id]['paused']:
+        elif track['paused']:
             # update state before awaiting, so the track can't change underneath us
-            playing[ctx.guild_id]['starttime'] = datetime.datetime.now()
-            playing[ctx.guild_id]['paused'] = False
+            track['starttime'] = datetime.datetime.now()
+            track['paused'] = False
             ctx.voice_client.resume()
             await ctx.respond('Resuming playback')
         else:
