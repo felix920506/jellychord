@@ -53,7 +53,7 @@ Images are published to `ghcr.io/felix920506/jellychord` only after the unit tes
 
 | Tag | Points to | Moves? |
 | --- | --- | --- |
-| `latest` | the newest commit on `main` | yes, on every push to `main` |
+| `latest` | the newest commit on `main` whose tests passed | yes, on each push to `main` that passes the tests |
 | `sha-<commit>` (for example `sha-1de0eab`) | one commit, by the first 7 characters of its hash | no |
 | `X.Y.Z` (for example `0.1.0`) | release `vX.Y.Z` | no |
 | `X.Y` (for example `0.1`) | the newest `X.Y.*` release (not set for pre-releases) | yes, on each `X.Y.*` release |

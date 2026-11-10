@@ -5,8 +5,9 @@ name: Build Docker Container
 #
 # Tags (see README.md, "Image tags"):
 #   sha-<short>, sha-<short>-<arch>  every published commit; written once, never moved
-#   latest, latest-<arch>            newest commit on main
-#   X.Y.Z, X.Y                       release tags vX.Y.Z (X.Y is skipped for pre-releases)
+#   latest, latest-<arch>            head of main (only moved to the current head)
+#   X.Y.Z, X.Y                       release tags vX.Y.Z (X.Y is skipped for pre-releases);
+#                                    added to main's sha-<short> image, never rebuilt
 #
 # The E2E canary (e2e.yml) does not gate publishing: it talks to the real
 # Discord and Jellyfin, mostly catches Discord-side breakage that no commit
@@ -20,7 +21,8 @@ on:
       - 'v*'
   workflow_dispatch:
 
-# Queue runs per ref so an older run can't move :latest after a newer one.
+# Queue runs per ref, so runs for main finish in push order. A re-run of an
+# older main commit is also kept off :latest (see generate-manifest).
 concurrency:
   group: build-container-${{ github.ref }}
   cancel-in-progress: false
@@ -98,18 +100,31 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       # sha-<short> is written once. If this commit was already published
-      # (a release tag on a commit from main, or a re-run), reuse that image
-      # instead of rebuilding it, so a release is the exact image main shipped.
+      # (by main, or a re-run), reuse that image instead of rebuilding it.
+      # Release tags never build: they only tag the image main already
+      # published, so a release is exactly what main shipped, and a tag run
+      # can't race main's run for the same commit (they queue separately).
+      # Only a confirmed "not found" counts as missing; any other error
+      # (auth, rate limit, network) fails the run rather than overwrite a tag.
       - name: check for an existing image
         id: existing
         env:
           SHA_TAG: ${{ steps.tags.outputs.sha-tag }}
+          REF: ${{ github.ref }}
         run: |
-          if docker buildx imagetools inspect "$IMAGE:$SHA_TAG" > /dev/null 2>&1; then
+          if out=$(docker buildx imagetools inspect "$IMAGE:$SHA_TAG" 2>&1); then
             echo "$IMAGE:$SHA_TAG already exists; reusing it" >> "$GITHUB_STEP_SUMMARY"
             echo "build=false" >> "$GITHUB_OUTPUT"
-          else
+          elif [[ "$out" == *"$IMAGE:$SHA_TAG: not found"* ]]; then
+            if [[ "$REF" == refs/tags/* ]]; then
+              echo "::error::$IMAGE:$SHA_TAG does not exist. Release tags reuse the image built from main: wait for this commit's main build to finish, then re-run this workflow."
+              exit 1
+            fi
             echo "build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "$out"
+            echo "::error::Could not check whether $IMAGE:$SHA_TAG exists"
+            exit 1
           fi
 
   generate-requirements-txt:
@@ -237,12 +252,23 @@ jobs:
           SHA_TAG: ${{ needs.plan.outputs.sha-tag }}
           ALIASES: ${{ needs.plan.outputs.aliases }}
           ARCH_ALIASES: ${{ needs.plan.outputs.arch-aliases }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           if [ "$BUILD" = "true" ]; then
             docker buildx imagetools create -t "$IMAGE:$SHA_TAG" \
               "$IMAGE:$SHA_TAG-amd64" \
               "$IMAGE:$SHA_TAG-arm64"
+          fi
+          # Only the current head of main may become latest. This keeps a
+          # re-run of an older main commit from moving latest backwards.
+          if [[ " $ALIASES $ARCH_ALIASES " == *" latest "* ]]; then
+            main_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)
+            if [ "$main_sha" != "$GITHUB_SHA" ]; then
+              echo "::warning::main is now at $main_sha, not $GITHUB_SHA; leaving latest alone"
+              ALIASES=$(echo "$ALIASES" | tr ' ' '\n' | grep -vx latest | tr '\n' ' ' || true)
+              ARCH_ALIASES=$(echo "$ARCH_ALIASES" | tr ' ' '\n' | grep -vx latest | tr '\n' ' ' || true)
+            fi
           fi
           for alias in $ARCH_ALIASES; do
             for arch in amd64 arm64; do
