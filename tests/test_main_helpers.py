@@ -60,6 +60,7 @@ def make_discord_stub():
             self.url = url
             self.kwargs = kwargs
             self.read_called = False
+            self.cleaned_up = False
 
         def read(self):
             self.read_called = True
