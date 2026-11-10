@@ -246,6 +246,8 @@ STREAM_IO_TIMEOUT = 30
 # backstop for loads ffmpeg's own timeout doesn't end; longer than it, so a
 # load that ffmpeg would still finish isn't cut short.
 TRACK_LOAD_TIMEOUT = 45
+# ffmpeg input options for a track's stream; -rw_timeout is in microseconds
+STREAM_INPUT_OPTIONS = f'-rw_timeout {STREAM_IO_TIMEOUT * 1_000_000}'
 
 def loadAudio(url: str) -> discord.FFmpegOpusAudio:
     """Start ffmpeg and wait for the first packet. Blocking, so run it in a
@@ -253,8 +255,7 @@ def loadAudio(url: str) -> discord.FFmpegOpusAudio:
     audio = discord.FFmpegOpusAudio(
         url,
         codec='copy',
-        # ffmpeg's -rw_timeout is in microseconds
-        before_options=f'-rw_timeout {STREAM_IO_TIMEOUT * 1_000_000}',
+        before_options=STREAM_INPUT_OPTIONS,
     )
     try:
         audio.read()
@@ -280,19 +281,24 @@ async def waitForLoad(url: str, skipRequested: asyncio.Event) -> discord.FFmpegO
     timeout or cancellation), the source it eventually returns is cleaned up."""
     load = asyncio.get_running_loop().run_in_executor(None, loadAudio, url)
     skipWait = asyncio.ensure_future(skipRequested.wait())
+    handedOver = False
     try:
         await asyncio.wait({load, skipWait}, timeout=TRACK_LOAD_TIMEOUT,
                            return_when=asyncio.FIRST_COMPLETED)
+        if load.done():
+            # if a skip came in too, the caller drops (and cleans up) the source
+            audio = load.result()
+            handedOver = True
+            return audio
+        if skipRequested.is_set():
+            return None
+        raise TimeoutError(f'Track did not start within {TRACK_LOAD_TIMEOUT} seconds')
     finally:
         skipWait.cancel()
-        if not load.done():
+        if not handedOver:
+            # Also covers a load that already finished, e.g. when this was
+            # cancelled before it could resume: done-callbacks still run then.
             load.add_done_callback(cleanupAbandonedLoad)
-    if load.done():
-        # if a skip came in too, the caller drops (and cleans up) the source
-        return load.result()
-    if skipRequested.is_set():
-        return None
-    raise TimeoutError(f'Track did not start within {TRACK_LOAD_TIMEOUT} seconds')
 
 def onTrackEnd(loop: asyncio.AbstractEventLoop, guild: discord.Guild, error: Exception | None):
     # Runs on the voice player thread: hand off to the event loop and return.

@@ -220,7 +220,7 @@ class PlayQueueTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(voice_client.play_calls), 1)
         audio, after = voice_client.play_calls[0]
         self.assertEqual(audio.url, "https://stream.example/first?bitrate=128000")
-        self.assertEqual(audio.kwargs["codec"], "copy")
+        self.assertEqual(audio.kwargs, {"codec": "copy", "before_options": self.main.STREAM_INPUT_OPTIONS})
         self.assertTrue(audio.read_called)
         self.assertTrue(callable(after))
         self.assertFalse(self.main.playing[42]["paused"])
@@ -968,6 +968,38 @@ class StalledLoadTests(unittest.IsolatedAsyncioTestCase):
         self.release.set()
         await self.wait_for(lambda: self.stalled[0].cleaned_up)
         self.assertEqual(voice_client.play_calls, [])
+
+    async def test_cancel_right_after_load_finishes_cleans_up_its_source(self):
+        # The load completes, but advanceTrack is cancelled (e.g. at shutdown)
+        # before waitForLoad resumes, so it never returns the source.
+        voice_client = FakeVoiceClient()
+        guild = types.SimpleNamespace(id=42, voice_client=voice_client)
+        self.main.queues[42] = [queue_entry("good")]
+        loop = asyncio.get_running_loop()
+        real_run_in_executor = loop.run_in_executor
+        tasks = []
+        sources = []
+
+        def run_in_executor(*args):
+            load = real_run_in_executor(*args)
+
+            def cancel_on_completion(future):
+                sources.append(future.result())
+                tasks[0].cancel()
+
+            # added before waitForLoad's own wait, so it runs first
+            load.add_done_callback(cancel_on_completion)
+            return load
+
+        with mock.patch.object(loop, "run_in_executor", run_in_executor):
+            tasks.append(asyncio.create_task(self.main.advanceTrack(guild)))
+            with self.assertRaises(asyncio.CancelledError):
+                await asyncio.wait_for(tasks[0], 5)
+
+        self.assertEqual(len(sources), 1)
+        await self.wait_for(lambda: sources[0].cleaned_up)
+        self.assertEqual(voice_client.play_calls, [])
+        self.assertNotIn(42, self.main.loading)
 
 
 class EmptyAlbumTests(unittest.IsolatedAsyncioTestCase):
