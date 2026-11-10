@@ -65,6 +65,9 @@ def make_discord_stub():
             self.read_called = True
             return b""
 
+        def cleanup(self):
+            self.cleaned_up = True
+
     def option(*args, **kwargs):
         return args[0] if args else object
 
@@ -91,6 +94,7 @@ def import_main_with_stubs():
         "JELLYCHORD_SEARCH_LIMIT": "25",
         "JELLYCHORD_ENABLE_DEBUG": "0",
         "JELLYCHORD_ENABLE_FAIRPLAY": "0",
+        "JELLYCHORD_LOG_LEVEL": "WARNING",
     }
 
     sys.modules.pop("main", None)
