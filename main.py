@@ -337,9 +337,10 @@ async def _advanceTrack(guild: discord.Guild, endedPlayer: object = None):
             # py-cord keeps the voice client and reconnects in the background.
             # Nothing else would restart playback once it's back, so wait here.
             if await waitForVoiceRecovery(guild, vc):
-                # /pause during the wait paused the track the outage cut off;
-                # keep the bot paused on the next one.
-                startPaused = startPaused or playing.get(guild.id, {}).get('paused', False)
+                # The now-playing entry holds the latest /pause or /resume
+                # (made during the wait, or carried over from a failed start),
+                # so it decides whether the next track starts paused.
+                startPaused = playing.get(guild.id, {}).get('paused', False)
                 continue  # recovered, or the voice client changed: look again
             return  # gave up and left voice
         if vc is None:
