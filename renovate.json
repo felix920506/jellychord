@@ -2,5 +2,15 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
     "config:recommended"
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Jellyfin image pinned for the E2E canary",
+      "managerFilePatterns": ["/^tests/e2e/run\\.mjs$/"],
+      "matchStrings": ["DEFAULT_JELLYFIN_IMAGE = '(?<depName>jellyfin/jellyfin):(?<currentValue>[^']+)'"],
+      "datasourceTemplate": "docker",
+      "versioningTemplate": "regex:^(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)-(?<build>\\d+)$"
+    }
   ]
 }

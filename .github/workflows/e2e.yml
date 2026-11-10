@@ -1,0 +1,234 @@
+name: E2E Discord canary
+
+# Runs the real bot against Discord's real servers and a real Jellyfin server,
+# plays tone tracks through Discord voice and checks what a listener bot hears.
+# Breakage usually comes from Discord-side changes, not commits, so the full
+# matrix runs on a schedule and failures open/update GitHub issues.
+# Setup: tests/e2e/README.md
+
+on:
+  schedule:
+    - cron: '23 5 * * *'
+  workflow_dispatch:
+    inputs:
+      scenarios:
+        description: 'full = all scenarios, smoke = startup + one track'
+        type: choice
+        options: [full, smoke]
+        default: full
+  push:
+    branches:
+      - main
+  pull_request:
+
+# All runs share one test guild and voice channel: never run two at once.
+concurrency:
+  group: discord-e2e
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout repo
+        uses: actions/checkout@v7
+
+      - name: setup python
+        uses: actions/setup-python@v6
+        with:
+          python-version: 3.12
+
+      - name: install poetry dependencies
+        run: |
+          python3 -m pip install poetry
+          poetry install --no-root
+
+      - name: python unit tests
+        run: poetry run python -m unittest discover -s tests -t . -v
+
+      - name: setup node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: tests/e2e/package-lock.json
+
+      - name: e2e harness unit tests
+        working-directory: tests/e2e
+        run: |
+          npm ci
+          npm test
+
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      enabled: ${{ steps.plan.outputs.enabled }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+      tracks: ${{ steps.plan.outputs.tracks }}
+      report-issues: ${{ steps.plan.outputs.report-issues }}
+    steps:
+      - id: plan
+        env:
+          HAS_SECRETS: ${{ secrets.E2E_SUT_TOKEN != '' && secrets.E2E_DRIVER_TOKEN != '' }}
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+        run: |
+          if [ "$HAS_SECRETS" != "true" ]; then
+            echo "::notice::E2E secrets are not available (fork PR or not configured); skipping Discord tests"
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "enabled=true" >> "$GITHUB_OUTPUT"
+
+          # PRs and pushes: test the code being changed. Schedule / manual runs on
+          # main: everything, including the image users actually run.
+          if [ "$EVENT" = "schedule" ] || [ "$EVENT" = "workflow_dispatch" ]; then
+            tracks="image locked latest"
+          else
+            tracks="locked"
+          fi
+          if [ "$REF" = "refs/heads/main" ] && { [ "$EVENT" = "schedule" ] || [ "$EVENT" = "workflow_dispatch" ]; }; then
+            echo "report-issues=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "report-issues=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          matrix=$(for t in $tracks; do
+            case "$t" in
+              image)  echo '{"track":"image","mode":"docker","runner":"ubuntu-24.04-arm"}' ;;
+              locked) echo '{"track":"locked","mode":"source","runner":"ubuntu-latest"}' ;;
+              latest) echo '{"track":"latest","mode":"source","runner":"ubuntu-latest"}' ;;
+            esac
+          done | jq -sc .)
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "tracks=${tracks// /,}" >> "$GITHUB_OUTPUT"
+
+  e2e:
+    name: e2e (${{ matrix.track }})
+    needs: [unit, plan]
+    if: needs.plan.outputs.enabled == 'true'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - name: checkout repo
+        uses: actions/checkout@v7
+
+      - name: setup node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: tests/e2e/package-lock.json
+
+      - name: install harness
+        working-directory: tests/e2e
+        run: npm ci
+
+      - name: setup python
+        if: matrix.mode == 'source'
+        uses: actions/setup-python@v6
+        with:
+          python-version: 3.12
+
+      - name: install ffmpeg
+        if: matrix.mode == 'source'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+
+      - name: install bot dependencies (locked)
+        if: matrix.mode == 'source'
+        run: |
+          python3 -m pip install poetry
+          poetry install --no-root
+          echo "E2E_PYTHON=$(poetry env info -p)/bin/python" >> "$GITHUB_ENV"
+
+      - name: upgrade to newest py-cord / davey
+        if: matrix.track == 'latest'
+        run: poetry run pip install --upgrade --pre "py-cord[voice]" davey
+
+      - name: pull released image
+        if: matrix.mode == 'docker'
+        run: docker pull ghcr.io/felix920506/jellychord:latest
+
+      - name: run e2e
+        working-directory: tests/e2e
+        env:
+          E2E_SUT_TOKEN: ${{ secrets.E2E_SUT_TOKEN }}
+          E2E_DRIVER_TOKEN: ${{ secrets.E2E_DRIVER_TOKEN }}
+          E2E_GUILD_ID: ${{ secrets.E2E_GUILD_ID }}
+          E2E_CONTROL_CHANNEL_ID: ${{ secrets.E2E_CONTROL_CHANNEL_ID }}
+          E2E_VOICE_CHANNEL_ID: ${{ secrets.E2E_VOICE_CHANNEL_ID }}
+          E2E_TRACK: ${{ matrix.track }}
+          E2E_SUT_MODE: ${{ matrix.mode }}
+          E2E_SCENARIOS: ${{ inputs.scenarios || 'full' }}
+          # Scheduled runs wait longer before retrying to ride out short Discord blips.
+          RETRY_DELAY: ${{ github.event_name == 'schedule' && '600' || '60' }}
+        run: |
+          if node run.mjs; then exit 0; fi
+          echo "::warning::E2E failed; retrying once in ${RETRY_DELAY}s to rule out a transient problem"
+          mv results results-attempt-1
+          sleep "$RETRY_DELAY"
+          node run.mjs
+
+      - name: job summary
+        if: always()
+        working-directory: tests/e2e
+        run: |
+          {
+            echo "## E2E: ${{ matrix.track }}"
+            if [ -f results-attempt-1/summary.md ]; then
+              echo "<details><summary>First attempt (failed, retried)</summary>"; echo
+              cat results-attempt-1/summary.md; echo; echo "</details>"; echo
+            fi
+            cat results/summary.md 2>/dev/null || echo "No results were produced."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Everything in results/ has been passed through the redactor.
+      - name: upload results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: results-${{ matrix.track }}
+          path: |
+            tests/e2e/results
+            tests/e2e/results-attempt-1
+          if-no-files-found: ignore
+          retention-days: 14
+
+  report:
+    needs: [plan, e2e]
+    if: always() && needs.plan.outputs.report-issues == 'true' && needs.e2e.result != 'skipped'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: checkout repo
+        uses: actions/checkout@v7
+
+      - name: setup node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: download results
+        uses: actions/download-artifact@v8
+        with:
+          pattern: results-*
+          path: reports
+
+      - name: open / update / close canary issues
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EXPECTED_TRACKS: ${{ needs.plan.outputs.tracks }}
+        run: node tests/e2e/ci/canary-issue.mjs reports
