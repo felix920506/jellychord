@@ -484,7 +484,9 @@ try {
   if (sut) report.diagnostics.sutNotableLog = sut.notableLines();
   if (report.failedStep) report.diagnostics.discordStatus = await discordStatus();
 
-  // Leave nothing behind in the shared guild.
+  // Leave nothing behind in the shared guild. The second account goes first:
+  // stopping the bot can take a while, and a retry shouldn't find it in voice.
+  await second?.leaveVoice().catch(() => {});
   if (driver && sut && !sut.exit) await resetPlayer().catch(() => {});
   await sut?.stop().catch(() => {});
   await driver?.destroy().catch(() => {});

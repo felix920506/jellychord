@@ -121,7 +121,7 @@ CI is split in two:
      (deafened) in the fairplay scenario. It has to be a bot: automating a
      user account is against Discord's terms.
 
-   None of the bots needs privileged intents. Invite both with the `bot` and
+   None of the bots needs privileged intents. Invite all three with the `bot` and
    `applications.commands` scopes and these permissions on the two channels:
    View Channel, Send Messages, Read Message History, Connect, Speak.
 3. **Repository secrets** (Settings → Secrets and variables → Actions):

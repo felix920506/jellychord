@@ -220,6 +220,18 @@ class InstallTests(unittest.TestCase):
         # the reply goes to whoever asked
         self.assertEqual(self.channel.sent, [(f'<@{SECOND_ID}> e2e {NONCE} r1 Playing x', 'a-view')])
 
+    def test_falls_back_to_the_message_author_when_the_member_is_not_cached(self):
+        # The bot caches members only while they are in voice. For a guild
+        # message py-cord makes the author a Member from the message's member
+        # data, and Member.voice reads the guild's voice states.
+        author = types.SimpleNamespace(id=SECOND_ID, voice=None)
+        self.guild.get_member = lambda uid: None
+        message = self.message(f'<@{BOT_ID}> e2e {NONCE} r1 play term=x', author_id=SECOND_ID)
+        message.author = author
+        asyncio.run(self.bot.listeners['on_message'](message))
+        self.assertIs(self.calls[0][0].author, author)
+        self.assertTrue(self.channel.sent[0][0].startswith(f'<@{SECOND_ID}> e2e {NONCE} r1 '))
+
     def test_parse_errors_mention_the_sender(self):
         self.send(f'<@{BOT_ID}> e2e', author_id=SECOND_ID)
         self.assertTrue(self.channel.sent[0][0].startswith(f'<@{SECOND_ID}> e2e parse-error '))

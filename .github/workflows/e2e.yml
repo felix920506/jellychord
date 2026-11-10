@@ -50,7 +50,7 @@ jobs:
     steps:
       - id: plan
         env:
-          HAS_SECRETS: ${{ secrets.E2E_SUT_TOKEN != '' && secrets.E2E_DRIVER_TOKEN != '' }}
+          HAS_SECRETS: ${{ secrets.E2E_SUT_TOKEN != '' && secrets.E2E_DRIVER_TOKEN != '' && secrets.E2E_SECOND_DRIVER_TOKEN != '' }}
           EVENT: ${{ github.event_name }}
           REF: ${{ github.ref }}
         run: |
