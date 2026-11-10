@@ -119,6 +119,8 @@ def make_discord_stub():
 
 
 def import_main_with_stubs(env_overrides=None):
+    """Import a fresh copy of the bot module (jellychord/bot.py) with discord
+    stubbed out and settings from the environment."""
     discord, discord_ext = make_discord_stub()
     env = {
         "JELLYCHORD_USE_CONF_FILE": "0",
@@ -133,11 +135,11 @@ def import_main_with_stubs(env_overrides=None):
         **(env_overrides or {}),
     }
 
-    sys.modules.pop("main", None)
+    sys.modules.pop("jellychord.bot", None)
     with mock.patch.dict(os.environ, env), mock.patch.dict(
         sys.modules, {"discord": discord, "discord.ext": discord_ext}
     ):
-        return importlib.import_module("main")
+        return importlib.import_module("jellychord.bot")
 
 
 class MainHelperTests(unittest.IsolatedAsyncioTestCase):
