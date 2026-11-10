@@ -2645,6 +2645,27 @@ class PlayDuringLeaveTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(42, self.main.playing)
         self.assertEqual(queue_ids(self.main.queues[42]), ["leftover", "chosen"])
 
+    async def test_playnow_still_plays_chosen_track_when_play_starts_during_its_reply(self):
+        self.main.queues[42] = [queue_entry("first"), queue_entry("chosen")]
+        ctx = SlowRespondContext(self.guild, author_id=100, channel=self.invoker_channel)
+        other_ctx = LiveContext(self.guild, author_id=200, channel=self.invoker_channel)
+
+        playnow = asyncio.create_task(self.main.playnow(ctx, 2))
+        await ctx.respond_started.wait()
+        # while /playnow's reply is in flight, /play next starts a session
+        await self.run_play(other_ctx, "other", "next")
+        session = self.new_session()
+        await self.wait_for(lambda: len(session.play_calls) == 1)
+        self.assertEqual(self.main.playing[42]["Id"], "other")
+        ctx.release_respond()
+        await playnow
+        await self.wait_for(lambda: len(session.play_calls) == 2)
+
+        self.assertEqual(ctx.responses, ["Now playing track: Artist - chosen"])
+        self.assertEqual(len(self.invoker_channel.clients), 1)
+        self.assertEqual(self.main.playing[42]["Id"], "chosen")
+        self.assertEqual(queue_ids(self.main.queues[42]), ["first"])
+
     async def test_playnow_when_in_voice_does_not_defer_or_reconnect(self):
         voice_client = FakeVoiceClient()
         voice_client.guild = self.guild

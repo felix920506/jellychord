@@ -1071,7 +1071,18 @@ if not config.get('fairplay'):
                 # Not in voice (kept queue after a leave): start a session,
                 # which plays from the front, where the track now is.
                 await ctx.respond(f'Now playing track: {getTrackString(item)}')
-                await startPlayer(ctx)
+                # Another /play or /start may have run while the reply was
+                # sent: put the track back in front if it is still waiting,
+                # and if that command already started a session, skip
+                # whatever it is playing so this track comes next.
+                queue = queues.get(ctx.guild_id, [])
+                waitingAt = next((i for i, e in enumerate(queue) if e is item), None)
+                if waitingAt is not None:
+                    queue.insert(0, queue.pop(waitingAt))
+                if not ctx.voice_client:
+                    await startPlayer(ctx)
+                elif waitingAt is not None:
+                    skipCurrentTrack(ctx.guild)
 
 @cmdgrp.command()
 async def clear(ctx: discord.ApplicationContext):
