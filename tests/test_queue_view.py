@@ -68,6 +68,8 @@ class QueueViewTests(unittest.IsolatedAsyncioTestCase):
 
         await self.main.remove(make_ctx(), 1)
 
+        # The number /queue shows for a track is the index /remove takes for it.
+        self.assertTrue(first_line.startswith("1. "))
         self.assertIn("Track 0", first_line)
         self.assertEqual([t["Id"] for t in self.main.queues[1]], ["t1", "t2"])
 
