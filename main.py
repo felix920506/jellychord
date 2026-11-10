@@ -5,6 +5,7 @@ import yaml
 import random
 import datetime
 import os
+import math
 import time
 import logging
 from itertools import zip_longest
@@ -72,10 +73,14 @@ playing = {}
 # guild id -> True if a skip was requested while the next track was loading
 loading = {}
 playerLocks = {}
-# Guilds where the bot itself started a voice disconnect (stopPlayback). A flag
-# left behind when no leave event arrives is discarded by startPlayer when the
-# next voice session starts.
-expectedDisconnects = set()
+# guild id -> time.monotonic() deadline until which a bot leave event counts as
+# the bot's own disconnect (stopPlayback) rather than a kick. py-cord doesn't
+# guarantee a leave event for every disconnect, so the flag expires shortly
+# after the disconnect finishes instead of waiting for one forever.
+expectedDisconnects = {}
+# How long after stopPlayback's disconnect returns its leave event may still
+# arrive. If py-cord delivers one, it is already queued by then.
+EXPECTED_LEAVE_GRACE = 5
 # Per-guild counter bumped on every bot leave event and every new voice session,
 # so a listener still waiting on an older leave knows it has been superseded.
 voiceEpochs = {}
@@ -161,7 +166,7 @@ async def startPlayer(ctx: discord.ApplicationContext):
     if not vc:
         av = ctx.author.voice
         if av:
-            expectedDisconnects.discard(ctx.guild.id)
+            expectedDisconnects.pop(ctx.guild.id, None)
             bumpVoiceEpoch(ctx.guild.id)
             vc = await av.channel.connect()
             await playTrack(ctx.guild)
@@ -340,11 +345,16 @@ async def stopPlayback(guild: discord.Guild, vc):
     queued are kept, so /start can pick them up."""
     playing.pop(guild.id, None)
     # tell onVoiceStateUpdate this leave is ours, so it keeps the queue
-    expectedDisconnects.add(guild.id)
+    expectedDisconnects[guild.id] = math.inf
     try:
         await vc.disconnect(force=True)
     except Exception:
         log.exception('Failed to disconnect from voice in guild %s', guild.id)
+        # still connected, so a later leave is not ours
+        expectedDisconnects.pop(guild.id, None)
+    else:
+        if guild.id in expectedDisconnects:
+            expectedDisconnects[guild.id] = time.monotonic() + EXPECTED_LEAVE_GRACE
 
 def clearGuildState(guildId: int):
     queues.pop(guildId, None)
@@ -364,9 +374,9 @@ async def onVoiceStateUpdate(member: discord.Member, before: discord.VoiceState,
 
     guild = member.guild
     epoch = bumpVoiceEpoch(guild.id)
-    if guild.id in expectedDisconnects:
+    ownLeaveDeadline = expectedDisconnects.pop(guild.id, None)
+    if ownLeaveDeadline is not None and time.monotonic() <= ownLeaveDeadline:
         # The bot left on its own (stopPlayback); queued tracks are kept for /start.
-        expectedDisconnects.discard(guild.id)
         return
 
     # py-cord also leaves and rejoins by itself while recovering a dropped voice

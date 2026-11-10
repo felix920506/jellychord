@@ -1,4 +1,5 @@
 import asyncio
+import math
 import threading
 import types
 import unittest
@@ -950,10 +951,51 @@ class VoiceStateListenerTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(42, self.main.expectedDisconnects)
 
     async def test_kick_after_own_leave_is_handled_normally(self):
-        self.main.expectedDisconnects.add(42)
+        self.main.expectedDisconnects[42] = math.inf
         await self.bot_leaves()  # the bot's own leave consumes the flag
         self.main.queues[42] = [queue_entry("new-session")]
 
+        await self.bot_leaves()
+
+        self.assertNotIn(42, self.main.queues)
+
+    async def test_kick_after_stale_own_leave_flag_clears_state(self):
+        # stopPlayback's disconnect finished without py-cord delivering a leave
+        # event, so the flag expired. A later kick must still clean up.
+        self.main.expectedDisconnects[42] = 0
+
+        await self.bot_leaves()
+
+        self.assertNotIn(42, self.main.queues)
+        self.assertNotIn(42, self.main.expectedDisconnects)
+
+    async def test_own_leave_flag_expires_after_disconnect_without_leave_event(self):
+        voice_client = FakeVoiceClient()
+        self.guild.voice_client = voice_client
+
+        with mock.patch.object(self.main.time, "monotonic", return_value=1000.0):
+            await self.main.stopPlayback(self.guild, voice_client)
+
+        self.assertEqual(self.main.expectedDisconnects[42], 1000.0 + self.main.EXPECTED_LEAVE_GRACE)
+        self.guild.voice_client = None
+        with mock.patch.object(self.main.time, "monotonic", return_value=1000.0 + self.main.EXPECTED_LEAVE_GRACE + 1):
+            await self.bot_leaves()
+
+        self.assertNotIn(42, self.main.queues)
+
+    async def test_failed_own_disconnect_does_not_hide_later_kick(self):
+        voice_client = FakeVoiceClient()
+        self.guild.voice_client = voice_client
+
+        async def failing_disconnect(force=False):
+            raise RuntimeError("gateway closed")
+
+        voice_client.disconnect = failing_disconnect
+        with self.assertLogs("jellychord", "ERROR"):
+            await self.main.stopPlayback(self.guild, voice_client)
+
+        self.assertNotIn(42, self.main.expectedDisconnects)
+        self.guild.voice_client = None
         await self.bot_leaves()
 
         self.assertNotIn(42, self.main.queues)
@@ -968,7 +1010,7 @@ class VoiceStateListenerTests(unittest.IsolatedAsyncioTestCase):
         self.main.queues[42] = [queue_entry("late")]
 
         async def fake_sleep(delay):
-            self.main.expectedDisconnects.add(42)
+            self.main.expectedDisconnects[42] = math.inf
             self.guild.voice_client = None
             await self.bot_leaves()
 
@@ -994,7 +1036,7 @@ class VoiceStateListenerTests(unittest.IsolatedAsyncioTestCase):
         async def fake_sleep(delay):
             # kicked, then /play starts a new session before the listener wakes
             self.guild.voice_client = None
-            self.main.expectedDisconnects.add(42)  # stale flag from an earlier session
+            self.main.expectedDisconnects[42] = math.inf  # stale flag from an earlier session
             with mock.patch.object(self.main, "playTrack", mock.AsyncMock()):
                 await self.main.startPlayer(ctx)
 
