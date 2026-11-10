@@ -33,6 +33,13 @@ def make_discord_stub():
         def stop(self):
             self.stopped = True
 
+        # Defaults match py-cord's View.
+        async def interaction_check(self, interaction):
+            return True
+
+        async def on_check_failure(self, interaction):
+            pass
+
         def add_item(self, item):
             item.view = self
             self.items.append(item)

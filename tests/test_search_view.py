@@ -16,10 +16,22 @@ def make_search_ctx():
     )
 
 
-def make_interaction():
+def make_interaction(user_id=100):
     return types.SimpleNamespace(
-        response=types.SimpleNamespace(edit_message=mock.AsyncMock()),
+        user=types.SimpleNamespace(id=user_id),
+        response=types.SimpleNamespace(
+            edit_message=mock.AsyncMock(),
+            send_message=mock.AsyncMock(),
+        ),
     )
+
+
+async def dispatch(view, item, interaction):
+    # Mirrors py-cord's View._scheduled_task: the item callback only runs if
+    # interaction_check passes, otherwise on_check_failure is called.
+    if not await view.interaction_check(interaction):
+        return await view.on_check_failure(interaction)
+    await item.callback(interaction)
 
 
 class SearchViewTests(unittest.IsolatedAsyncioTestCase):
@@ -86,6 +98,29 @@ class SearchViewTests(unittest.IsolatedAsyncioTestCase):
                 await self.select(dropdown, 0)
 
         self.assertTrue(view.stopped)
+
+    async def test_other_user_cannot_pick_and_invoker_still_can(self):
+        tracks = [raw_track("a", name="Song A"), raw_track("b", name="Song B")]
+        ctx, view, dropdown = await self.open_search(tracks)
+        other = make_interaction(user_id=200)
+
+        with mock.patch.object(self.main, "playHelperGeneric", mock.AsyncMock()) as play:
+            dropdown._selected_values = ["0"]
+            await dispatch(view, dropdown, other)
+
+            other.response.send_message.assert_awaited_once()
+            self.assertTrue(other.response.send_message.await_args.kwargs.get("ephemeral"))
+            other.response.edit_message.assert_not_awaited()
+            play.assert_not_awaited()
+            self.assertFalse(view.stopped)
+
+            owner = make_interaction(user_id=ctx.author.id)
+            dropdown._selected_values = ["1"]
+            await dispatch(view, dropdown, owner)
+
+        self.assertTrue(view.stopped)
+        self.assertIn("Song B", owner.response.edit_message.await_args.kwargs["content"])
+        play.assert_awaited_once_with(tracks[1], ctx, "last")
 
     async def test_timeout_without_selection_shows_timed_out(self):
         # py-cord calls view.on_timeout() with no arguments.
