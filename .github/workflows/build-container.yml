@@ -102,15 +102,8 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Pull AMD64 image
-        run: docker pull ghcr.io/felix920506/jellychord:latest-amd64
-
-      - name: Pull ARM64 image
-        run: docker pull ghcr.io/felix920506/jellychord:latest-arm64
-
       - name: Create and push manifest images
         run: |
-          docker manifest create ghcr.io/felix920506/jellychord:latest \
+          docker buildx imagetools create -t ghcr.io/felix920506/jellychord:latest \
             ghcr.io/felix920506/jellychord:latest-amd64 \
             ghcr.io/felix920506/jellychord:latest-arm64
-          docker manifest push ghcr.io/felix920506/jellychord:latest
