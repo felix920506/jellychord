@@ -2084,11 +2084,16 @@ class FakeChannel:
         self.clients = []
 
     async def connect(self):
+        # py-cord 2.8.1 refuses a second client, registers the new one before
+        # its first await, then awaits the voice handshake.
+        if self.guild.voice_client is not None:
+            raise RuntimeError("Already connected to a voice channel.")
         voice_client = FakeVoiceClient(bitrate=self.bitrate)
         voice_client.channel = self
         voice_client.guild = self.guild
         self.guild.voice_client = voice_client
         self.clients.append(voice_client)
+        await asyncio.sleep(0.01)
         return voice_client
 
 
@@ -2152,7 +2157,8 @@ class PlayDuringLeaveTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         for state in (self.main.queues, self.main.playing, self.main.loading, self.main.playerLocks,
                       self.main.expectedDisconnects, self.main.voiceEpochs, self.main.currentPlayers,
-                      self.main.leaving):
+                      # getattr: on code without it, the tests fail by assertion
+                      getattr(self.main, "leaving", {})):
             state.clear()
         self.main.config["fairplay"] = False
         self.main.JF_APICLIENT = FakeJFAPI()
@@ -2173,7 +2179,7 @@ class PlayDuringLeaveTests(unittest.IsolatedAsyncioTestCase):
     async def assert_nothing_left(self):
         # nothing is left waiting on a leave, or playing it out
         await self.wait_for(lambda: len(asyncio.all_tasks()) == 1)
-        self.assertEqual(self.main.leaving, {})
+        self.assertEqual(getattr(self.main, "leaving", {}), {})
 
     async def wait_for(self, predicate, timeout=5):
         async with asyncio.timeout(timeout):
@@ -2246,6 +2252,65 @@ class PlayDuringLeaveTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(new_client.stopped)
         self.assertEqual(self.main.playing[42]["Id"], "late")
         self.assertEqual(queue_ids(self.main.queues[42]), ["queued"])
+
+    async def test_now_pick_waiting_with_another_pick_is_not_skipped(self):
+        old_client = await self.leaving_after_last_track()
+        ctx = LiveContext(self.guild, channel=self.invoker_channel)
+
+        # both wait on the same leave; the urgent one is queued first in line
+        first = asyncio.create_task(self.main.playHelperGeneric(raw_track("first-pick"), ctx, "last"))
+        await self.assert_waiting(first)
+        urgent = asyncio.create_task(self.main.playHelperGeneric(raw_track("urgent-pick"), ctx, "now"))
+        await self.assert_waiting(urgent)
+        self.assertEqual(queue_ids(self.main.queues[42]), ["urgent-pick", "first-pick"])
+        await self.finish_leave(old_client)
+        await asyncio.gather(first, urgent)
+
+        # The new session starts with the urgent track; its own waiter must
+        # not skip it (what it would have interrupted left with the old session).
+        new_client = self.new_session()
+        self.assertFalse(new_client.stopped)
+        self.assertEqual(len(new_client.play_calls), 1)
+        self.assertEqual(self.main.playing[42]["Id"], "urgent-pick")
+        self.assertEqual(queue_ids(self.main.queues[42]), ["first-pick"])
+
+    async def test_play_now_waiting_with_a_pick_is_not_skipped(self):
+        old_client = await self.leaving_after_last_track()
+        ctx = LiveContext(self.guild, channel=self.invoker_channel)
+
+        first = asyncio.create_task(self.main.playHelperGeneric(raw_track("first-pick"), ctx, "last"))
+        await self.assert_waiting(first)
+        # /play waits before queueing, so its track is queued after the leave
+        urgent = asyncio.create_task(self.run_play(ctx, "urgent", when="now"))
+        await self.assert_waiting(urgent)
+        await self.finish_leave(old_client)
+        await asyncio.gather(first, urgent)
+
+        new_client = self.new_session()
+        self.assertFalse(new_client.stopped)
+        self.assertEqual(len(new_client.play_calls), 1)
+        played = [self.main.playing[42]["Id"]] + queue_ids(self.main.queues[42])
+        self.assertCountEqual(played, ["first-pick", "urgent"])
+
+    async def test_two_plays_waiting_on_one_leave_join_once(self):
+        old_client = await self.leaving_after_last_track()
+        ctx_a = LiveContext(self.guild, author_id=100, channel=self.invoker_channel)
+        ctx_b = LiveContext(self.guild, author_id=101, channel=self.invoker_channel)
+
+        play_a = asyncio.create_task(self.run_play(ctx_a, "late-a"))
+        await self.assert_waiting(play_a)
+        play_b = asyncio.create_task(self.run_play(ctx_b, "late-b"))
+        await self.assert_waiting(play_b)
+        await self.finish_leave(old_client)
+        await asyncio.gather(play_a, play_b)
+
+        # one connect; the other sees the client registered and only queues
+        self.assertEqual(ctx_a.responses, ["Playing Track: Artist - late-a"])
+        self.assertEqual(ctx_b.responses, ["Playing Track: Artist - late-b"])
+        new_client = self.new_session()
+        self.assertEqual(len(new_client.play_calls), 1)
+        self.assertEqual(self.main.playing[42]["Id"], "late-a")
+        self.assertEqual(queue_ids(self.main.queues[42]), ["late-b"])
 
     async def test_search_pick_during_final_leave_plays_after_leaving(self):
         old_client = await self.leaving_after_last_track()
