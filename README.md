@@ -47,6 +47,31 @@ services:
 
 This can also be found in the repository as `compose.yaml`
 
+#### Image tags
+
+Images are published to `ghcr.io/felix920506/jellychord` only after the unit tests pass for that commit.
+
+| Tag | Points to | Moves? |
+| --- | --- | --- |
+| `latest` | the newest commit on `main` whose tests passed | yes, on each push to `main` that passes the tests |
+| `sha-<commit>` (for example `sha-1de0eab`) | one commit, by the first 7 characters of its hash | no |
+| `X.Y.Z` (for example `0.1.0`) | release `vX.Y.Z` | no |
+| `X.Y` (for example `0.1`) | the newest `X.Y.*` release (not set for pre-releases) | yes, on each `X.Y.*` release |
+
+Each tag is a multi-arch image (amd64 and arm64). Single-architecture tags are also published as `latest-amd64`, `latest-arm64`, `sha-<commit>-amd64` and `sha-<commit>-arm64`. Releases do not move `latest`.
+
+To pin a version, or roll back after a bad update, replace `latest` in your compose file with a release or commit tag and recreate the container:
+
+```yml
+    image: ghcr.io/felix920506/jellychord:sha-1de0eab
+```
+
+```sh
+docker compose pull && docker compose up -d
+```
+
+The available tags are listed on the [package page](https://github.com/felix920506/jellychord/pkgs/container/jellychord). Switch back to `latest` to follow `main` again.
+
 Logs go to stderr at the `INFO` level by default. Set `JELLYCHORD_LOG_LEVEL` (`DEBUG`, `INFO`, `WARNING`, `ERROR`) to change it.
 
 You will need to create a Discord bot account to run this application.
