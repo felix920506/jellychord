@@ -275,6 +275,15 @@ async function scenarioFairplay() {
     expectReply(await driver.command('play', { term: b.title, type: 'Soundtrack' }), b.title);
     expectReply(await driver.command('play', { term: c.title, type: 'Soundtrack', ...asOther }), c.title);
   });
+  // when=now isn't offered in fairplay mode (#83); the hook can still send it.
+  // Had it gone through, it would skip the listener's track and queue another
+  // a, which the rotation order check below would hear.
+  await report.step('bot-behavior', 'fairplay: play when=now is refused', async () =>
+    expectReply(
+      await driver.command('play', { term: a.title, type: 'Soundtrack', when: 'now' }),
+      "isn't available in fairplay mode",
+    ),
+  );
   // Without fairplay the order would be a, b, c.
   await report.step('bot-behavior', 'fairplay: queue alternates between the two users', async () =>
     expectReply(

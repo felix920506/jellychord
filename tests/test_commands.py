@@ -300,12 +300,65 @@ class SearchRefusalTests(CommandTestCase):
         self.assertEqual(self.main.queues, {})
 
 
+class FairplayWhenNowTests(CommandTestCase):
+    """when=now would skip another user's track, and the rotation still picks
+    what plays next, so fairplay mode refuses it (#83)."""
+
+    def setUp(self):
+        super().setUp()
+        self.main.config["fairplay"] = True
+
+    async def run_command(self, command, when, queue=None):
+        guild = types.SimpleNamespace(id=42, voice_client=None)
+        ctx = LiveContext(guild, channel=object())
+        if queue is not None:
+            self.main.queues[42] = queue
+        search = mock.AsyncMock(return_value=[raw_track("found")])
+        with mock.patch.object(self.main, "searchHelper", search):
+            await command(ctx, "term", None, when)
+        return ctx, search
+
+    async def test_play_and_search_refuse_now(self):
+        for name in ("play", "search"):
+            with self.subTest(command=name):
+                self.main.queues.clear()
+                ctx, search = await self.run_command(getattr(self.main, name), "now",
+                                                     queue={200: [queue_entry("other")]})
+
+                self.assertEqual(ctx.responses, [self.main.WHEN_NOW_FAIRPLAY_MESSAGE])
+                search.assert_not_awaited()
+                self.assertEqual({uid: queue_ids(q) for uid, q in self.main.queues[42].items()}, {200: ["other"]})
+
+    async def test_play_next_still_queues_at_the_front_of_the_users_own_queue(self):
+        voice_client = FakeVoiceClient()
+        guild = types.SimpleNamespace(id=42, voice_client=voice_client)
+        ctx = LiveContext(guild, channel=object())
+        self.main.queues[42] = {100: [queue_entry("mine")], 200: [queue_entry("other")]}
+        with mock.patch.object(self.main, "searchHelper", mock.AsyncMock(return_value=[raw_track("found")])):
+            await self.main.play(ctx, "term", None, "next")
+
+        self.assertEqual(queue_ids(self.main.queues[42][100]), ["found", "mine"])
+        self.assertEqual(queue_ids(self.main.queues[42][200]), ["other"])
+        self.assertNotIn(self.main.WHEN_NOW_FAIRPLAY_MESSAGE, ctx.responses)
+
+    async def test_now_is_allowed_without_fairplay(self):
+        self.main.config["fairplay"] = False
+        ctx, search = await self.run_command(self.main.search, "now")
+
+        search.assert_awaited_once()
+        self.assertNotIn(self.main.WHEN_NOW_FAIRPLAY_MESSAGE, ctx.responses)
+
+
 class FairplayRegistrationTests(unittest.TestCase):
     def test_playnow_is_not_registered_with_fairplay(self):
         main = import_main_with_stubs({"JELLYCHORD_ENABLE_FAIRPLAY": "1"})
 
         self.assertTrue(main.config["fairplay"])
         self.assertFalse(hasattr(main, "playnow"))
+
+    def test_when_now_is_only_offered_without_fairplay(self):
+        self.assertEqual(import_main_with_stubs({"JELLYCHORD_ENABLE_FAIRPLAY": "1"}).WHEN_CHOICES, ["next", "last"])
+        self.assertEqual(import_main_with_stubs().WHEN_CHOICES, ["now", "next", "last"])
 
 
 if __name__ == "__main__":

@@ -121,7 +121,7 @@ If a required setting is missing or a setting has an invalid value, the bot exit
 This list will assume the default prefix of `jellychord`. This can be changed in the config.
 
 - `/jellychord search <term> <type> <when>`
-  Search for a list of items using `<term>`. Options for `<when>` term: `now` stops current track and plays the specified track. `next` places the specified track next in the queue. `last` is the default behavior, places the specified track at the end of the playlist.
+  Search for a list of items using `<term>`. Options for `<when>` term: `now` stops current track and plays the specified track (not available in fairplay mode, since it would skip other users' tracks). `next` places the specified track next in the queue. `last` is the default behavior, places the specified track at the end of the playlist.
 - `/jellychord play <term> <type> <when>`
   Parameters work the same as the above command, except it directly uses the first result returned from the server, instead of asking the user to choose from a list of options
 - `/jellychord skip`
