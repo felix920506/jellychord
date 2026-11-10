@@ -1,6 +1,10 @@
 import unittest
 import urllib.parse
 
+import aiohttp
+from aiohttp import web
+from aiohttp.test_utils import TestServer
+
 from jfapi import JFAPI
 
 
@@ -12,6 +16,9 @@ class FakeResponse:
         return self
 
     async def __aexit__(self, exc_type, exc, tb):
+        return None
+
+    def raise_for_status(self):
         return None
 
     async def json(self):
@@ -101,6 +108,97 @@ class JFAPITests(unittest.IsolatedAsyncioTestCase):
                 "sortBy": "ParentIndexNumber,IndexNumber",
             },
         )
+
+
+class JFAPIServerTests(unittest.IsolatedAsyncioTestCase):
+    """Talks to a local HTTP server that answers GET /Items like Jellyfin."""
+
+    async def asyncSetUp(self):
+        self.requests = []
+        # (status, body, content type) for every GET /Items
+        self.reply = (200, '{"Items": [{"Id": "track-1"}]}', "application/json")
+
+        async def handler(request):
+            self.requests.append((request.method, request.path))
+            status, body, contentType = self.reply
+            return web.Response(status=status, text=body, content_type=contentType)
+
+        app = web.Application()
+        app.router.add_route("*", "/{tail:.*}", handler)
+        self.server = TestServer(app)
+        await self.server.start_server()
+        self.addAsyncCleanup(self.server.close)
+        self.serverUrl = str(self.server.make_url("/"))
+
+    def calls(self, api):
+        return {
+            "search": lambda: api.search("mint"),
+            "getItemsByIds": lambda: api.getItemsByIds(["a"]),
+            "getAlbumTracks": lambda: api.getAlbumTracks("album-1"),
+        }
+
+    async def test_http_errors_raise_client_response_error(self):
+        replies = [
+            (401, "Unauthorized", "text/plain"),  # not JSON
+            (500, '{"error": "boom"}', "application/json"),  # JSON without Items
+        ]
+        for reply in replies:
+            async with JFAPI(self.serverUrl, "secret-key") as api:
+                for name, call in self.calls(api).items():
+                    with self.subTest(status=reply[0], call=name):
+                        self.reply = reply
+                        with self.assertRaises(aiohttp.ClientResponseError) as cm:
+                            await call()
+                        self.assertEqual(cm.exception.status, reply[0])
+
+    async def test_success_returns_items(self):
+        async with JFAPI(self.serverUrl, "secret-key") as api:
+            for name, call in self.calls(api).items():
+                with self.subTest(call=name):
+                    self.assertEqual(await call(), [{"Id": "track-1"}])
+        self.assertEqual(self.requests, [("GET", "/Items")] * 3)
+
+    async def test_context_manager_returns_client_and_closes_session(self):
+        client = JFAPI(self.serverUrl, "secret-key")
+        async with client as api:
+            self.assertIs(api, client)
+            await api.search("mint")
+            session = api._session
+            self.assertFalse(session.closed)
+        self.assertTrue(session.closed)
+        self.assertIsNone(client._session)
+
+    async def test_context_manager_exit_on_exception_closes_session(self):
+        client = JFAPI(self.serverUrl, "secret-key")
+        with self.assertRaises(ValueError):
+            async with client:
+                await client.search("mint")
+                session = client._session
+                raise ValueError("inside the block")
+        self.assertTrue(session.closed)
+
+    async def test_close_closes_session_and_can_be_repeated(self):
+        api = JFAPI(self.serverUrl, "secret-key")
+        await api.search("mint")
+        session = api._session
+
+        await api.close()
+        await api.close()
+
+        self.assertTrue(session.closed)
+        self.assertIsNone(api._session)
+        # only the search reached the server, nothing on close
+        self.assertEqual(self.requests, [("GET", "/Items")])
+
+    async def test_unused_client_makes_no_request(self):
+        api = JFAPI(self.serverUrl, "secret-key")
+        api.getAudioHls("item-1", 128000)  # only builds a URL
+        async with api:
+            pass
+        await api.close()
+
+        self.assertIsNone(api._session)
+        self.assertEqual(self.requests, [])
 
 
 if __name__ == "__main__":
