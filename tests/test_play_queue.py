@@ -220,7 +220,7 @@ class PlayQueueTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(voice_client.play_calls), 1)
         audio, after = voice_client.play_calls[0]
         self.assertEqual(audio.url, "https://stream.example/first?bitrate=128000")
-        self.assertEqual(audio.kwargs, {"codec": "copy"})
+        self.assertEqual(audio.kwargs, {"codec": "copy", "before_options": self.main.STREAM_INPUT_OPTIONS})
         self.assertTrue(audio.read_called)
         self.assertTrue(callable(after))
         self.assertFalse(self.main.playing[42]["paused"])
@@ -353,8 +353,8 @@ class PlayQueueTests(unittest.IsolatedAsyncioTestCase):
             self.main.skipCurrentTrack(guild)
             load.finish()
             await task
-
-        self.assertTrue(load.loads[0].cleaned_up)
+            # the skip doesn't wait for the load; its source is cleaned up once it finishes
+            await self.wait_for(lambda: load.loads[0].cleaned_up)
         self.assertEqual([audio.url for audio, _ in voice_client.play_calls], [load.loads[1].url])
         self.assertEqual(self.main.playing[42]["Id"], "second")
 
@@ -370,8 +370,8 @@ class PlayQueueTests(unittest.IsolatedAsyncioTestCase):
             await self.main.stop(ctx)
             load.finish()
             await task
-
-        self.assertTrue(load.loads[0].cleaned_up)
+            # the skip doesn't wait for the load; its source is cleaned up once it finishes
+            await self.wait_for(lambda: load.loads[0].cleaned_up)
         self.assertEqual(voice_client.play_calls, [])
         self.assertTrue(voice_client.disconnect_requested)
         self.assertNotIn(42, self.main.queues)
@@ -804,6 +804,202 @@ class AdvanceTrackFailureTests(unittest.IsolatedAsyncioTestCase):
                     await asyncio.sleep(0.01)
 
         self.assertEqual(self.main.playing[42]["Id"], "second")
+
+
+class StalledLoadTests(unittest.IsolatedAsyncioTestCase):
+    """A stream that accepts the connection but never sends data blocks the
+    first read() in loadAudio. That must not wedge playback (#60), and the
+    abandoned source must still be cleaned up (#63)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.main = import_main_with_stubs()
+
+    def setUp(self):
+        self.main.queues.clear()
+        self.main.playing.clear()
+        self.main.loading.clear()
+        self.main.playerLocks.clear()
+        self.main.config["fairplay"] = False
+        self.main.JF_APICLIENT = FakeJFAPI()
+
+        test = self
+        self.release = threading.Event()
+        self.stalled = []
+        self.read_started = threading.Event()
+        real_audio_class = self.main.discord.FFmpegOpusAudio
+
+        class StallingAudio(real_audio_class):
+            """read() blocks for "stalled" tracks until the test releases it."""
+
+            def read(self):
+                if "stalled" in self.url:
+                    test.stalled.append(self)
+                    test.read_started.set()
+                    test.release.wait(10)
+                return super().read()
+
+        patch = mock.patch.object(self.main.discord, "FFmpegOpusAudio", StallingAudio)
+        patch.start()
+        self.addCleanup(patch.stop)
+        # release blocked worker threads before the loop shuts down its executor
+        self.addCleanup(self.release.set)
+
+    def patch_load_timeout(self, seconds):
+        patch = mock.patch.object(self.main, "TRACK_LOAD_TIMEOUT", seconds)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    async def wait_for(self, predicate, timeout=5):
+        async with asyncio.timeout(timeout):
+            while not predicate():
+                await asyncio.sleep(0.01)
+
+    async def wait_for_stalled_read(self, count=1):
+        await self.wait_for(lambda: len(self.stalled) >= count)
+
+    def played_ids(self, voice_client):
+        return [audio.url.split("/")[-1].split("?")[0] for audio, _ in voice_client.play_calls]
+
+    async def test_load_timeout_drops_track_and_next_one_plays(self):
+        self.patch_load_timeout(0.05)
+        voice_client = FakeVoiceClient()
+        guild = types.SimpleNamespace(id=42, voice_client=voice_client)
+        self.main.queues[42] = [queue_entry("stalled"), queue_entry("good")]
+
+        with self.assertLogs("jellychord", "ERROR") as logs:
+            await asyncio.wait_for(self.main.advanceTrack(guild), 5)
+
+        self.assertIn("Failed to start the next track in guild 42 (attempt 1/", logs.output[0])
+        self.assertEqual(self.played_ids(voice_client), ["good"])
+        self.assertEqual(self.main.playing[42]["Id"], "good")
+        self.assertNotIn(42, self.main.loading)
+
+        # the worker thread is still stuck; once it finishes, its source is cleaned up
+        self.assertFalse(self.stalled[0].cleaned_up)
+        self.release.set()
+        await self.wait_for(lambda: self.stalled[0].cleaned_up)
+
+    async def test_repeated_load_timeouts_give_up_and_disconnect(self):
+        self.patch_load_timeout(0.05)
+        attempts = self.main.MAX_START_ATTEMPTS
+        voice_client = FakeVoiceClient()
+        guild = types.SimpleNamespace(id=42, voice_client=voice_client)
+        self.main.queues[42] = [queue_entry(f"stalled-{i}") for i in range(attempts)] + [queue_entry("untouched")]
+
+        with self.assertLogs("jellychord", "ERROR") as logs:
+            await asyncio.wait_for(self.main.advanceTrack(guild), 5)
+
+        self.assertIn(f"Giving up on playback in guild 42 after {attempts} failed attempts", logs.output[-1])
+        self.assertEqual(voice_client.play_calls, [])
+        self.assertTrue(voice_client.disconnect_requested)
+        self.assertEqual(queue_ids(self.main.queues[42]), ["untouched"])
+
+        self.release.set()
+        await self.wait_for(lambda: len(self.stalled) == attempts and all(a.cleaned_up for a in self.stalled))
+
+    async def test_skip_during_stuck_load_takes_effect_without_waiting(self):
+        # the load timeout is far away: only the skip can end the wait
+        voice_client = FakeVoiceClient()
+        ctx = FakeContext(voice_client=voice_client)
+        ctx.respond = mock.AsyncMock()
+        self.main.queues[42] = [queue_entry("stalled"), queue_entry("good")]
+
+        with self.assertNoLogs("jellychord", "ERROR"):
+            task = asyncio.create_task(self.main.advanceTrack(ctx.guild))
+            await self.wait_for_stalled_read()
+            await self.main.skip(ctx)
+            await asyncio.wait_for(task, 5)
+
+        ctx.respond.assert_awaited_once_with("Skipping current track")
+        self.assertEqual(self.played_ids(voice_client), ["good"])
+        self.assertEqual(self.main.playing[42]["Id"], "good")
+
+        self.release.set()
+        await self.wait_for(lambda: self.stalled[0].cleaned_up)
+
+    async def test_stop_during_stuck_load_disconnects_without_waiting(self):
+        voice_client = FakeVoiceClient()
+        ctx = FakeContext(voice_client=voice_client)
+        ctx.respond = mock.AsyncMock()
+        self.main.queues[42] = [queue_entry("stalled"), queue_entry("second")]
+
+        task = asyncio.create_task(self.main.advanceTrack(ctx.guild))
+        await self.wait_for_stalled_read()
+        await self.main.stop(ctx)
+        await asyncio.wait_for(task, 5)
+
+        self.assertEqual(voice_client.play_calls, [])
+        self.assertTrue(voice_client.disconnect_requested)
+        self.assertNotIn(42, self.main.queues)
+        self.assertNotIn(42, self.main.playing)
+
+        self.release.set()
+        await self.wait_for(lambda: self.stalled[0].cleaned_up)
+
+    async def test_later_advance_is_not_blocked_by_stuck_load(self):
+        self.patch_load_timeout(0.2)
+        voice_client = FakeVoiceClient()
+        guild = types.SimpleNamespace(id=42, voice_client=voice_client)
+        self.main.queues[42] = [queue_entry("stalled"), queue_entry("good")]
+
+        with self.assertLogs("jellychord", "ERROR"):
+            first = asyncio.create_task(self.main.advanceTrack(guild))
+            await self.wait_for_stalled_read()
+            # e.g. an after= callback queued behind the stuck load
+            await asyncio.wait_for(self.main.advanceTrack(guild), 5)
+            await asyncio.wait_for(first, 5)
+
+        self.assertEqual(self.played_ids(voice_client), ["good"])
+        self.assertFalse(self.main.playerLocks[42].locked())
+
+    async def test_cancelled_load_cleans_up_its_source(self):
+        voice_client = FakeVoiceClient()
+        guild = types.SimpleNamespace(id=42, voice_client=voice_client)
+        self.main.queues[42] = [queue_entry("stalled")]
+
+        task = asyncio.create_task(self.main.advanceTrack(guild))
+        await self.wait_for_stalled_read()
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+
+        self.assertNotIn(42, self.main.loading)
+        self.release.set()
+        await self.wait_for(lambda: self.stalled[0].cleaned_up)
+        self.assertEqual(voice_client.play_calls, [])
+
+    async def test_cancel_right_after_load_finishes_cleans_up_its_source(self):
+        # The load completes, but advanceTrack is cancelled (e.g. at shutdown)
+        # before waitForLoad resumes, so it never returns the source.
+        voice_client = FakeVoiceClient()
+        guild = types.SimpleNamespace(id=42, voice_client=voice_client)
+        self.main.queues[42] = [queue_entry("good")]
+        loop = asyncio.get_running_loop()
+        real_run_in_executor = loop.run_in_executor
+        tasks = []
+        sources = []
+
+        def run_in_executor(*args):
+            load = real_run_in_executor(*args)
+
+            def cancel_on_completion(future):
+                sources.append(future.result())
+                tasks[0].cancel()
+
+            # added before waitForLoad's own wait, so it runs first
+            load.add_done_callback(cancel_on_completion)
+            return load
+
+        with mock.patch.object(loop, "run_in_executor", run_in_executor):
+            tasks.append(asyncio.create_task(self.main.advanceTrack(guild)))
+            with self.assertRaises(asyncio.CancelledError):
+                await asyncio.wait_for(tasks[0], 5)
+
+        self.assertEqual(len(sources), 1)
+        await self.wait_for(lambda: sources[0].cleaned_up)
+        self.assertEqual(voice_client.play_calls, [])
+        self.assertNotIn(42, self.main.loading)
 
 
 class EmptyAlbumTests(unittest.IsolatedAsyncioTestCase):
