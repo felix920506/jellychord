@@ -47,6 +47,8 @@ services:
 
 This can also be found in the repository as `compose.yaml`
 
+Logs go to stderr at the `INFO` level by default. Set `JELLYCHORD_LOG_LEVEL` (`DEBUG`, `INFO`, `WARNING`, `ERROR`) to change it.
+
 You will need to create a Discord bot account to run this application.
 
 ### Directly from source
