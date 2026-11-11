@@ -3,16 +3,7 @@ import unittest
 from unittest import mock
 
 from tests.test_main_helpers import import_main_with_stubs
-from tests.test_play_queue import FakeVoiceClient, queue_entry, queue_ids, raw_track
-
-
-def run_coroutine_inline(coro, loop):
-    # the fake API never really awaits, so one step runs it to completion
-    try:
-        coro.send(None)
-    except StopIteration as stop:
-        return stop.value
-    raise AssertionError("coroutine did not finish in one step")
+from tests.test_play_queue import FakeVoiceClient, queue_entry, queue_ids, raw_track, run_coroutine_inline
 
 
 class FakeRadioJFAPI:
@@ -56,9 +47,8 @@ class FakeChannel:
     def __init__(self):
         self.sent = []
 
-    def send(self, message):
+    async def send(self, message):
         self.sent.append(message)
-        return "send-coroutine"
 
 
 class FakeRadioContext:
@@ -106,6 +96,9 @@ class RadioTestCase(unittest.IsolatedAsyncioTestCase):
         self.main.queues.clear()
         self.main.playing.clear()
         self.main.radioStates.clear()
+        self.main.playerActive.clear()
+        self.main.disconnecting.clear()
+        self.main.stopCounts.clear()
         self.main.musicLibraryCache.update({"time": None, "items": []})
         self.main.config["fairplay"] = False
         self.main.runOnLoop = run_coroutine_inline
@@ -113,11 +106,12 @@ class RadioTestCase(unittest.IsolatedAsyncioTestCase):
         self.voice_client = FakeVoiceClient()
         self.guild = types.SimpleNamespace(id=42, voice_client=self.voice_client)
         self.scheduled = []
-        patcher = mock.patch.object(
-            self.main.asyncio,
-            "run_coroutine_threadsafe",
-            lambda coro, loop: self.scheduled.append(coro),
-        )
+
+        def run_scheduled(coro, loop):
+            self.scheduled.append(coro.__name__)
+            run_coroutine_inline(coro)
+
+        patcher = mock.patch.object(self.main.asyncio, "run_coroutine_threadsafe", run_scheduled)
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -269,7 +263,7 @@ class RadioFailureTests(RadioTestCase):
         self.assertEqual(self.voice_client.play_calls, [])
         self.assertTrue(self.voice_client.disconnect_requested)
         self.assertEqual(len(channel.sent), 1)
-        self.assertEqual(self.scheduled, ["send-coroutine", "disconnect-coroutine"])
+        self.assertEqual(self.scheduled, ["send", "disconnectIfIdle"])
 
     def test_empty_library_counts_as_failure_until_radio_turns_off(self):
         api = self.use_api()
@@ -350,6 +344,71 @@ class RadioFailureTests(RadioTestCase):
 
         self.assertEqual(len(sleeps), 1)
 
+    def test_failed_queue_track_is_dropped_without_counting_against_radio(self):
+        api = self.use_api(songs=[raw_track("random-1")])
+        self.main.radioStates[42] = radio_state()
+        self.main.queues[42] = [queue_entry("queued-broken"), queue_entry("queued-good")]
+        real_play = self.voice_client.play
+        attempts = []
+
+        def play_failing_once(audio, after):
+            attempts.append(audio.url)
+            if "queued-broken" in audio.url:
+                raise RuntimeError("stream broke")
+            real_play(audio, after)
+
+        self.voice_client.play = play_failing_once
+
+        self.main.playNextTrack(self.guild)
+
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(self.main.playing[42]["Id"], "queued-good")
+        self.assertEqual(self.main.radioStates[42]["failures"], 0)
+        self.assertEqual(api.random_requests, [])
+        self.assertIn(42, self.main.playerActive)
+
+    def test_queue_track_success_does_not_reset_radio_failure_count(self):
+        self.use_api()
+        state = radio_state()
+        state["failures"] = 3
+        self.main.radioStates[42] = state
+        self.main.queues[42] = [queue_entry("queued")]
+
+        self.main.playNextTrack(self.guild)
+
+        self.assertEqual(state["failures"], 3)
+
+    def test_silent_queue_track_still_plays_like_without_radio(self):
+        self.use_api()
+        self.main.radioStates[42] = radio_state()
+        self.main.queues[42] = [queue_entry("queued")]
+        base = self.main.discord.FFmpegOpusAudio
+
+        class SilentAudio(base):
+            def read(self):
+                super().read()
+                return b""
+
+        with mock.patch.object(self.main.discord, "FFmpegOpusAudio", SilentAudio):
+            self.main.playNextTrack(self.guild)
+
+        self.assertEqual(len(self.voice_client.play_calls), 1)
+        self.assertEqual(self.main.radioStates[42]["failures"], 0)
+
+    def test_failed_playback_without_radio_clears_active_mark(self):
+        self.use_api()
+        self.main.queues[42] = [queue_entry("queued")]
+
+        def broken_play(audio, after):
+            raise RuntimeError("not connected")
+
+        self.voice_client.play = broken_play
+
+        with self.assertRaises(RuntimeError):
+            self.main.playNextTrack(self.guild)
+
+        self.assertNotIn(42, self.main.playerActive)
+
     def test_queue_track_failure_still_raises_when_radio_is_off(self):
         self.use_api()
         self.main.queues[42] = [queue_entry("queued")]
@@ -406,7 +465,99 @@ class RadioCommandTests(RadioTestCase):
         self.assertTrue(self.voice_client.disconnect_requested)
         self.assertEqual(self.voice_client.play_calls, [])
 
+    async def test_stop_while_a_queued_track_is_loading_drops_that_track(self):
+        self.use_api()
+        self.main.queues[42] = [queue_entry("loading"), queue_entry("later")]
+        ctx = FakeRadioContext(voice_client=self.voice_client)
+        base = self.main.discord.FFmpegOpusAudio
+        created = []
+        test = self
+
+        class StoppedWhileLoadingAudio(base):
+            def read(inner_self):
+                created.append(inner_self)
+                # the stop command arrives while ffmpeg is still starting up
+                run_coroutine_inline(test.main.stop(ctx))
+                return super().read()
+
+        with mock.patch.object(self.main.discord, "FFmpegOpusAudio", StoppedWhileLoadingAudio):
+            self.main.playNextTrack(self.guild)
+
+        self.assertEqual(self.voice_client.play_calls, [])
+        self.assertEqual(len(created), 1)
+        self.assertTrue(created[0].cleaned_up)
+        self.assertNotIn(42, self.main.playing)
+        self.assertNotIn(42, self.main.queues)
+        self.assertTrue(self.voice_client.disconnect_requested)
+
+    async def test_stop_while_a_radio_track_is_loading_drops_that_track(self):
+        self.use_api(songs=[raw_track("random-1")])
+        self.main.radioStates[42] = radio_state()
+        ctx = FakeRadioContext(voice_client=self.voice_client)
+        base = self.main.discord.FFmpegOpusAudio
+        test = self
+
+        class StoppedWhileLoadingAudio(base):
+            def read(inner_self):
+                run_coroutine_inline(test.main.stop(ctx))
+                return super().read()
+
+        with mock.patch.object(self.main.discord, "FFmpegOpusAudio", StoppedWhileLoadingAudio):
+            self.main.playNextTrack(self.guild)
+
+        self.assertEqual(self.voice_client.play_calls, [])
+        self.assertNotIn(42, self.main.radioStates)
+        self.assertTrue(self.voice_client.disconnect_requested)
+
+    async def test_radio_on_starts_playback_when_connected_but_idle(self):
+        api = self.use_api(songs=[raw_track("random-1")])
+        self.voice_client.is_paused = lambda: False
+        ctx = FakeRadioContext(voice_client=self.voice_client)
+
+        async def run_in_place(func, *args):
+            return func(*args)
+
+        with mock.patch.object(self.main.asyncio, "to_thread", run_in_place):
+            await self.main.radio(ctx, "song")
+
+        self.assertEqual(len(self.voice_client.play_calls), 1)
+        self.assertEqual(self.main.playing[42]["Id"], "random-1")
+        self.assertIn(42, self.main.playerActive)
+        self.assertEqual(len(api.random_requests), 2)
+
+        # the disconnect that was already on its way finds playback running again and backs off
+        await self.main.disconnectIfIdle(self.guild, self.voice_client)
+        self.assertFalse(self.voice_client.disconnect_requested)
+
+    async def test_radio_on_with_same_settings_restarts_playback_when_idle(self):
+        self.use_api(songs=[raw_track("random-1")])
+        self.voice_client.is_paused = lambda: False
+        state = radio_state()
+        self.main.radioStates[42] = state
+        ctx = FakeRadioContext(voice_client=self.voice_client)
+
+        async def run_in_place(func, *args):
+            return func(*args)
+
+        with mock.patch.object(self.main.asyncio, "to_thread", run_in_place):
+            await self.main.radio(ctx, "song")
+
+        self.assertIs(self.main.radioStates[42], state)
+        self.assertEqual(len(self.voice_client.play_calls), 1)
+
+    async def test_radio_on_is_refused_while_the_bot_is_leaving(self):
+        api = self.use_api(songs=[raw_track("random-1")])
+        self.main.disconnecting.add(42)
+        ctx = FakeRadioContext(voice_client=self.voice_client)
+
+        await self.main.radio(ctx, "song")
+
+        self.assertNotIn(42, self.main.radioStates)
+        self.assertEqual(api.random_requests, [])
+        self.assertEqual(ctx.responses, ["Still leaving the voice channel, try again in a moment"])
+
     async def test_radio_on_validates_and_stores_state_without_touching_playback(self):
+        self.main.playerActive.add(42)
         api = self.use_api(
             songs=[raw_track("random-1")],
             libraries=[{"Id": "lib-1", "Name": "Music"}],
@@ -424,6 +575,7 @@ class RadioCommandTests(RadioTestCase):
         self.assertEqual(ctx.responses, ["Radio on: playing random songs from the Music library whenever the queue is empty"])
 
     async def test_radio_on_accepts_library_name_typed_by_hand(self):
+        self.main.playerActive.add(42)
         self.use_api(albums=[{"Id": "album-1", "Name": "First Album"}], libraries=[{"Id": "lib-1", "Name": "Music"}])
         ctx = FakeRadioContext(voice_client=self.voice_client)
 
@@ -499,6 +651,7 @@ class RadioCommandTests(RadioTestCase):
         self.assertEqual(ctx.responses, ["Could not get items from the Jellyfin server"])
 
     async def test_radio_on_again_with_same_settings_keeps_album_buffer(self):
+        self.main.playerActive.add(42)
         self.use_api(albums=[{"Id": "album-1", "Name": "First Album"}])
         state = radio_state(mode="album", buffer=[radio_entry("a2", "First Album")], album="First Album")
         self.main.radioStates[42] = state
@@ -510,6 +663,7 @@ class RadioCommandTests(RadioTestCase):
         self.assertEqual(ctx.responses, ["Radio is already playing random albums from all libraries"])
 
     async def test_switching_mode_drops_the_rest_of_the_album(self):
+        self.main.playerActive.add(42)
         api = self.use_api(songs=[raw_track("random-1")])
         self.main.radioStates[42] = radio_state(mode="album", buffer=[radio_entry("a2", "First Album")], album="First Album")
         self.main.playing[42] = radio_entry("a1", "First Album")

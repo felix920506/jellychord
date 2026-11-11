@@ -66,6 +66,12 @@ playing = {}
 # album: name of the album the buffer came from, failures: consecutive failures,
 # channel: text channel to notify if radio has to turn itself off
 radioStates = {}
+# guilds that have a playback chain running (a track playing, paused, loading or waiting to retry)
+playerActive = set()
+# guilds whose voice connection is being closed right now
+disconnecting = set()
+# number of times stop was used per guild, lets a track that is still loading notice it was stopped
+stopCounts = {}
 musicLibraryCache = {'time': None, 'items': []}
 
 bot = discord.Bot()
@@ -147,7 +153,20 @@ async def playTrack(guild: discord.Guild):
     if vc.is_paused():
         vc.resume()
     else:
+        # marked here already so nothing else starts a second chain before the thread gets going
+        playerActive.add(guild.id)
         await asyncio.to_thread(playNextTrack, guild)
+
+async def disconnectIfIdle(guild, vc):
+    # runs on the event loop, so commands can not slip in between the check and the disconnect starting
+    if guild.id in playerActive:
+        # playback was started again before the disconnect got its turn
+        return
+    disconnecting.add(guild.id)
+    try:
+        await vc.disconnect()
+    finally:
+        disconnecting.discard(guild.id)
 
 def takeQueueTrack(guild):
     # moves the next track of the queue into playing
@@ -230,18 +249,19 @@ def takeRadioTrack(guild, vc, state: dict) -> bool:
     playing[guild.id] = entry
     return True
 
-def startPlayback(guild, vc, state: dict = None) -> bool:
+def startPlayback(guild, vc, state: dict = None, stopCount: int = 0) -> bool:
     # starts playing the track in playing
-    # returns False if the track was dropped because radio changed while it was loading
+    # returns False if the track was dropped because of a stop or radio change while it was loading
+    isRadio = playing[guild.id].get('Radio')
     br = vc.channel.bitrate
     url = JF_APICLIENT.getAudioHls(playing[guild.id]["Id"],br)
     audio = discord.FFmpegOpusAudio(url, codec='copy')
     try:
-        if not audio.read() and state is not None:
+        if not audio.read() and isRadio:
             # nothing came out of the stream, without this check
             # radio would spin through tracks while the server is failing
             raise RuntimeError(f'No audio received for track {playing[guild.id]["Id"]}')
-        if playing[guild.id].get('Radio') and radioStates.get(guild.id) is not state:
+        if stopCounts.get(guild.id, 0) != stopCount or (isRadio and radioStates.get(guild.id) is not state):
             audio.cleanup()
             return False
         playing[guild.id]['starttime'] = datetime.datetime.now()
@@ -278,6 +298,16 @@ def handleRadioFailure(guild, vc, state: dict, error: Exception):
         time.sleep(min(0.25, max(0, deadline - time.monotonic())))
 
 def playNextTrack(guild, error=None):
+    playerActive.add(guild.id)
+    started = False
+    try:
+        started = advancePlayback(guild)
+    finally:
+        if not started:
+            playerActive.discard(guild.id)
+
+def advancePlayback(guild) -> bool:
+    # starts the next track, returns False if playback ended instead
     global playing
     global queues
     while True:
@@ -286,11 +316,13 @@ def playNextTrack(guild, error=None):
             # voice connection is gone, nothing left to play to
             playing.pop(guild.id, None)
             radioStates.pop(guild.id, None)
-            return
+            return False
 
         state = radioStates.get(guild.id)
+        stopCount = stopCounts.get(guild.id, 0)
+        fromQueue = guild.id in queues
         try:
-            if guild.id in queues:
+            if fromQueue:
                 # queued tracks always go before radio
                 takeQueueTrack(guild)
             elif state is not None:
@@ -298,22 +330,28 @@ def playNextTrack(guild, error=None):
                     continue
             else:
                 playing.pop(guild.id, None)
-                asyncio.run_coroutine_threadsafe(vc.disconnect(), vc.loop)
-                return
+                # has to be cleared before the disconnect is scheduled, see disconnectIfIdle
+                playerActive.discard(guild.id)
+                asyncio.run_coroutine_threadsafe(disconnectIfIdle(guild, vc), vc.loop)
+                return False
 
-            if not startPlayback(guild, vc, state):
+            if not startPlayback(guild, vc, state, stopCount):
                 continue
         except Exception as e:
             if state is None:
                 raise
-            # nothing is playing while radio waits to try again
+            # nothing is playing while radio moves on or waits to try again
             playing.pop(guild.id, None)
-            handleRadioFailure(guild, vc, state, e)
+            if fromQueue:
+                # a queued track that fails is dropped, it says nothing about radio
+                log.warning('Could not play queued track in guild %s: %r', guild.id, e)
+            else:
+                handleRadioFailure(guild, vc, state, e)
             continue
 
-        if state is not None:
+        if state is not None and not fromQueue:
             state['failures'] = 0
-        return
+        return True
 
 def getTrackString(item: dict, artistLimit: int = 1, showType: bool = False, showSize: bool = False):
 
@@ -636,6 +674,8 @@ async def stop(ctx: discord.ApplicationContext):
             queues.pop(ctx.guild_id)
         # radio has to go too, otherwise it would just pick another track
         radioStates.pop(ctx.guild_id, None)
+        # a track that is still loading can not be stopped yet, this makes it get dropped instead
+        stopCounts[ctx.guild_id] = stopCounts.get(ctx.guild_id, 0) + 1
         ctx.voice_client.stop()
     else:
         await ctx.respond('Not connected to any voice channel')
@@ -776,6 +816,10 @@ async def radio(ctx: discord.ApplicationContext,
         await ctx.respond('You are not in any voice channel')
         return
 
+    if ctx.guild_id in disconnecting:
+        await ctx.respond('Still leaving the voice channel, try again in a moment')
+        return
+
     await ctx.defer()
     itemType = 'Audio' if mode == 'song' else 'MusicAlbum'
     libraryId = None
@@ -803,30 +847,38 @@ async def radio(ctx: discord.ApplicationContext,
         await ctx.respond(f'No {mode}s found in {source}')
         return
 
+    if ctx.guild_id in disconnecting:
+        # the bot started leaving while the server was being asked
+        await ctx.respond('Still leaving the voice channel, try again in a moment')
+        return
+
     current = radioStates.get(ctx.guild_id)
     if current and current['mode'] == mode and current['libraryId'] == libraryId:
         await ctx.respond(f'Radio is already playing random {mode}s from {source}')
-        return
+    else:
+        # replacing the state drops what is left of the current radio album
+        # the track that is playing right now is left alone
+        radioStates[ctx.guild_id] = {
+            'mode': mode,
+            'libraryId': libraryId,
+            'libraryName': libraryName,
+            'buffer': [],
+            'album': None,
+            'failures': 0,
+            'channel': ctx.channel
+        }
+        await ctx.respond(f'Radio on: playing random {mode}s from {source} whenever the queue is empty')
 
-    # replacing the state drops what is left of the current radio album
-    # the track that is playing right now is left alone
-    radioStates[ctx.guild_id] = {
-        'mode': mode,
-        'libraryId': libraryId,
-        'libraryName': libraryName,
-        'buffer': [],
-        'album': None,
-        'failures': 0,
-        'channel': ctx.channel
-    }
-    await ctx.respond(f'Radio on: playing random {mode}s from {source} whenever the queue is empty')
-
-    if not ctx.voice_client:
-        try:
+    try:
+        if not ctx.voice_client:
             await startPlayer(ctx)
-        except Exception:
-            radioStates.pop(ctx.guild_id, None)
-            raise
+        elif ctx.guild_id not in playerActive:
+            # connected but nothing is driving playback, e.g. the last track just ended
+            # and the bot has not left yet
+            await playTrack(ctx.guild)
+    except Exception:
+        radioStates.pop(ctx.guild_id, None)
+        raise
 
 '''
 Debug Commands

@@ -28,6 +28,15 @@ def queue_ids(queue):
     return [item["Id"] for item in queue]
 
 
+def run_coroutine_inline(coro, loop=None):
+    # the fakes never really wait, so one step runs a coroutine to completion
+    try:
+        coro.send(None)
+    except StopIteration as stop:
+        return stop.value
+    raise AssertionError("coroutine did not finish in one step")
+
+
 class FakeJFAPI:
     def __init__(self, album_tracks=None):
         self.album_tracks = album_tracks or {}
@@ -57,9 +66,8 @@ class FakeVoiceClient:
     def stop(self):
         self.stopped = True
 
-    def disconnect(self):
+    async def disconnect(self):
         self.disconnect_requested = True
-        return "disconnect-coroutine"
 
 
 class FakeContext:
@@ -78,6 +86,7 @@ class PlayQueueTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.main.queues.clear()
         self.main.playing.clear()
+        self.main.playerActive.clear()
         self.main.config["fairplay"] = False
         self.main.JF_APICLIENT = FakeJFAPI()
 
@@ -197,15 +206,52 @@ class PlayQueueTests(unittest.IsolatedAsyncioTestCase):
         scheduled = []
 
         def fake_run_coroutine_threadsafe(coro, loop):
-            scheduled.append((coro, loop))
+            scheduled.append((coro.__name__, loop))
+            run_coroutine_inline(coro)
             return object()
 
         with mock.patch.object(self.main.asyncio, "run_coroutine_threadsafe", fake_run_coroutine_threadsafe):
             self.main.playNextTrack(guild)
 
         self.assertNotIn(42, self.main.playing)
+        self.assertNotIn(42, self.main.playerActive)
         self.assertTrue(voice_client.disconnect_requested)
-        self.assertEqual(scheduled, [("disconnect-coroutine", voice_client.loop)])
+        self.assertEqual(scheduled, [("disconnectIfIdle", voice_client.loop)])
+
+    def test_play_next_track_marks_playback_active_while_a_track_plays(self):
+        voice_client = FakeVoiceClient()
+        guild = types.SimpleNamespace(id=42, voice_client=voice_client)
+        self.main.queues[42] = [queue_entry("only")]
+
+        self.main.playNextTrack(guild)
+
+        self.assertIn(42, self.main.playerActive)
+
+    async def test_disconnect_is_skipped_when_playback_was_started_again(self):
+        voice_client = FakeVoiceClient()
+        guild = types.SimpleNamespace(id=42, voice_client=voice_client)
+        self.main.playerActive.add(42)
+
+        await self.main.disconnectIfIdle(guild, voice_client)
+
+        self.assertFalse(voice_client.disconnect_requested)
+
+    async def test_disconnect_marks_guild_as_disconnecting_until_done(self):
+        seen = []
+
+        class SlowVoiceClient(FakeVoiceClient):
+            async def disconnect(inner_self):
+                seen.append(42 in self.main.disconnecting)
+                await super().disconnect()
+
+        voice_client = SlowVoiceClient()
+        guild = types.SimpleNamespace(id=42, voice_client=voice_client)
+
+        await self.main.disconnectIfIdle(guild, voice_client)
+
+        self.assertEqual(seen, [True])
+        self.assertTrue(voice_client.disconnect_requested)
+        self.assertNotIn(42, self.main.disconnecting)
 
 
 if __name__ == "__main__":
