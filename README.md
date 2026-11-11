@@ -72,6 +72,8 @@ docker compose pull && docker compose up -d
 
 The available tags are listed on the [package page](https://github.com/felix920506/jellychord/pkgs/container/jellychord). Switch back to `latest` to follow `main` again.
 
+To build the image yourself, or to see how images and releases are published, read [README.Docker.md](README.Docker.md).
+
 Logs go to stderr at the `INFO` level by default. Set `JELLYCHORD_LOG_LEVEL` (`DEBUG`, `INFO`, `WARNING`, `ERROR`) to change it.
 
 You will need to create a Discord bot account to run this application.
@@ -92,9 +94,8 @@ Steps:
 5. Create a Jellyfin API key in the dashboard and supply it in `config.yml`
 6. Open a terminal in the bot folder
 7. run `poetry install` to install dependencies
-8. Open a terminal in the bot folder
-9. run `poetry run python3 main.py` to start the bot. You may need to run `poetry run python main.py` if you are on Windows.
-10. Press `Ctrl+C` in the terminal window to exit the bot. MacOS uses the same key bind.
+8. run `poetry run python3 main.py` to start the bot. You may need to run `poetry run python main.py` if you are on Windows.
+9. Press `Ctrl+C` in the terminal window to exit the bot. MacOS uses the same key bind.
 
 ### Settings
 

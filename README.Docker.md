@@ -1,22 +1,25 @@
-### Building and running your application
+# JellyChord Docker image
 
-When you're ready, start your application by running:
-`docker compose up --build`.
+To run the published image, see [Using docker compose](README.md#using-docker-compose) in `README.md`.
+This file covers building the image yourself and how images are published.
 
-Your application will be available at http://localhost:8000.
+### Building the image yourself
 
-### Deploying your application to the cloud
+The `Dockerfile` installs dependencies from a `requirements.txt` that is not in
+the repository. Export it from `poetry.lock` first, then build:
 
-First, build your image, e.g.: `docker build -t myapp .`.
-If your cloud uses a different CPU architecture than your development
-machine (e.g., you are on a Mac M1 and your cloud provider is amd64),
-you'll want to build the image for that platform, e.g.:
-`docker build --platform=linux/amd64 -t myapp .`.
+```sh
+poetry install
+poetry export --without-hashes -f requirements.txt --output requirements.txt
+docker build -t jellychord .
+```
 
-Then, push it to your registry, e.g. `docker push myregistry.com/myapp`.
+`poetry install` is needed even if you only want the export: it installs the
+export plugin that `pyproject.toml` asks for.
 
-Consult Docker's [getting started](https://docs.docker.com/go/get-started-sharing/)
-docs for more detail on building and pushing.
+To run your build, replace the `image:` in `compose.yaml` with `jellychord`
+and run `docker compose up -d`. The bot only makes outgoing connections, so no
+ports need to be published.
 
 ### Published images
 
@@ -44,6 +47,3 @@ and `pyproject.toml` disagree.
 The E2E canary (`e2e.yml`) does not gate publishing: it depends on Discord and
 Jellyfin being up and mostly catches Discord-side changes, which it reports as
 GitHub issues.
-
-### References
-* [Docker's Python guide](https://docs.docker.com/language/python/)
