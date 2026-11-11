@@ -1,44 +1,40 @@
-# Include any files or directories that you don't want to be copied to your
-# container here (e.g., local build artifacts, temporary files, etc.).
-#
-# For more help, visit the .dockerignore file reference guide at
-# https://docs.docker.com/go/build-context-dockerignore/
+# Files listed here are left out of the image. The image only needs main.py,
+# jfapi.py and the jellychord/ package. requirements.txt must stay in the build
+# context, because the Dockerfile mounts it to install dependencies.
 
-**/.DS_Store
-**/__pycache__
-**/.venv
-**/.classpath
-**/.dockerignore
+# Local configuration and secrets. config.yml may hold the Discord token and
+# Jellyfin API key.
+config.yml
 **/.env
-**/.git
-**/.gitignore
-**/.project
-**/.settings
-**/.toolstarget
-**/.vs
-**/.vscode
-**/*.*proj.user
-**/*.dbmdl
-**/*.jfm
-**/bin
-**/charts
-**/docker-compose*
-**/compose.y*ml
-**/Dockerfile*
-**/node_modules
-**/npm-debug.log
-**/obj
 **/secrets.dev.yaml
 **/values.dev.yaml
-**/tests
+
+# Git, CI and editor files
+**/.git
+**/.gitignore
 **/.gitattributes
+**/.github
+**/.vscode
+**/.DS_Store
+
+# Python caches and environments
+**/__pycache__
+**/.pytest_cache
+**/.venv
 **/.poetry
-config.yml
+
+# Docker files
+**/.dockerignore
+**/Dockerfile*
+**/compose.y*ml
+**/docker-compose*
+
+# Tests, documentation and project metadata
+**/tests
 config.yml.example
 LICENSE
 README.md
-poetry.lock
 README.Docker.md
+poetry.lock
 pyproject.toml
 renovate.json
-**/.github

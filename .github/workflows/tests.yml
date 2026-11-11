@@ -1,0 +1,48 @@
+name: Tests
+
+# Unit tests for the bot and the E2E harness. Needs no credentials, so it runs
+# on every push and on every pull request, including PRs from forks.
+# build-container.yml also calls it (workflow_call) so an image is only
+# published for a commit whose tests pass.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout repo
+        uses: actions/checkout@v7
+
+      - name: setup python
+        uses: actions/setup-python@v7
+        with:
+          python-version: 3.14
+
+      - name: install poetry dependencies
+        run: |
+          python3 -m pip install poetry
+          poetry install --no-root
+
+      - name: python unit tests
+        run: poetry run python -m unittest discover -s tests -t . -v
+
+      - name: setup node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: tests/e2e/package-lock.json
+
+      - name: e2e harness unit tests
+        working-directory: tests/e2e
+        run: |
+          npm ci
+          npm test

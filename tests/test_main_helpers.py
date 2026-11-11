@@ -1,3 +1,4 @@
+import datetime
 import importlib
 import os
 import sys
@@ -11,12 +12,23 @@ def make_discord_stub():
     discord_ext = types.ModuleType("discord.ext")
 
     class FakeSelect:
+        # Like py-cord's Select, the user's choice is only exposed through the
+        # public values property (None until refresh_state has run). The
+        # private storage deliberately has a different name from py-cord's.
         def __init__(self, *args, **kwargs):
             self.options = []
             self.view = None
+            self._fake_selected = None
 
         def add_option(self, **kwargs):
             self.options.append(kwargs)
+
+        def refresh_state(self, data):
+            self._fake_selected = list(data.get("values", []))
+
+        @property
+        def values(self):
+            return self._fake_selected
 
     class FakeButton:
         def __init__(self, *args, **kwargs):
@@ -27,6 +39,18 @@ def make_discord_stub():
     class FakeView:
         def __init__(self, *args, **kwargs):
             self.items = []
+            self.stopped = False
+            self.message = None
+
+        def stop(self):
+            self.stopped = True
+
+        # Defaults match py-cord's View.
+        async def interaction_check(self, interaction):
+            return True
+
+        async def on_check_failure(self, interaction):
+            pass
 
         def add_item(self, item):
             item.view = self
@@ -47,6 +71,11 @@ def make_discord_stub():
         def __init__(self, *args, **kwargs):
             self.groups = []
             self.run_token = None
+            self.user = None
+            self.listeners = []
+
+        def add_listener(self, func, name):
+            self.listeners.append((name, func))
 
         def create_group(self, *args, **kwargs):
             self.groups.append((args, kwargs))
@@ -55,17 +84,19 @@ def make_discord_stub():
         def run(self, token):
             self.run_token = token
 
+        async def close(self):
+            self.closed = True
+
     class FakeFFmpegOpusAudio:
         def __init__(self, url, **kwargs):
             self.url = url
             self.kwargs = kwargs
             self.read_called = False
-
             self.cleaned_up = False
 
         def read(self):
             self.read_called = True
-            return b"\x00"
+            return b""
 
         def cleanup(self):
             self.cleaned_up = True
@@ -81,13 +112,17 @@ def make_discord_stub():
     discord.ApplicationContext = type("ApplicationContext", (), {})
     discord.Interaction = type("Interaction", (), {})
     discord.Guild = type("Guild", (), {})
+    discord.Member = type("Member", (), {})
+    discord.VoiceState = type("VoiceState", (), {})
     discord.FFmpegOpusAudio = FakeFFmpegOpusAudio
     discord.ui = types.SimpleNamespace(Select=FakeSelect, Button=FakeButton, View=FakeView)
     discord.ext = discord_ext
     return discord, discord_ext
 
 
-def import_main_with_stubs():
+def import_main_with_stubs(env_overrides=None):
+    """Import a fresh copy of the bot module (jellychord/bot.py) with discord
+    stubbed out and settings from the environment."""
     discord, discord_ext = make_discord_stub()
     env = {
         "JELLYCHORD_USE_CONF_FILE": "0",
@@ -98,13 +133,15 @@ def import_main_with_stubs():
         "JELLYCHORD_SEARCH_LIMIT": "25",
         "JELLYCHORD_ENABLE_DEBUG": "0",
         "JELLYCHORD_ENABLE_FAIRPLAY": "0",
+        "JELLYCHORD_LOG_LEVEL": "WARNING",
+        **(env_overrides or {}),
     }
 
-    sys.modules.pop("main", None)
+    sys.modules.pop("jellychord.bot", None)
     with mock.patch.dict(os.environ, env), mock.patch.dict(
         sys.modules, {"discord": discord, "discord.ext": discord_ext}
     ):
-        return importlib.import_module("main")
+        return importlib.import_module("jellychord.bot")
 
 
 class MainHelperTests(unittest.IsolatedAsyncioTestCase):
@@ -170,6 +207,58 @@ class MainHelperTests(unittest.IsolatedAsyncioTestCase):
             "Album: Various Artists - Compilation",
         )
         self.assertEqual(self.main.getTrackString(no_artist), "Untitled")
+
+    def test_get_item_entry_defaults_missing_artists_and_length(self):
+        self.assertEqual(
+            self.main.getItemEntry({"Name": "Track", "Id": "track-1"}),
+            {"Artists": [], "Name": "Track", "Id": "track-1", "Length": 0},
+        )
+        self.assertEqual(
+            self.main.getItemEntry({"Name": "Track", "Id": "track-1", "Artists": None, "RunTimeTicks": None}),
+            {"Artists": [], "Name": "Track", "Id": "track-1", "Length": 0},
+        )
+
+    def test_get_track_string_handles_missing_artists_and_length(self):
+        self.assertEqual(
+            self.main.getTrackString({"Type": "Audio", "Name": "Bare"}, showType=True, showSize=True),
+            "Track: Bare",
+        )
+        self.assertEqual(
+            self.main.getTrackString({"Type": "Audio", "Name": "Zero", "Artists": ["A"], "RunTimeTicks": 0},
+                                     showSize=True),
+            "A - Zero",
+        )
+        # queue entries carry Length instead of RunTimeTicks and no Type
+        self.assertEqual(self.main.getTrackString({"Name": "Entry", "Id": "e", "Artists": [], "Length": 0}), "Entry")
+
+    def playing_now(self, length, elapsed=75, **extra):
+        self.main.playing[42] = {
+            "Artists": ["Artist"],
+            "Name": "Song",
+            "Id": "song",
+            "paused": True,
+            "playtime-offset": datetime.timedelta(seconds=elapsed),
+            "starttime": datetime.datetime.now(),
+            **({} if length is None else {"Length": length}),
+            **extra,
+        }
+
+    async def nowplaying_reply(self):
+        ctx = types.SimpleNamespace(guild_id=42, respond=mock.AsyncMock())
+        await self.main.nowplaying(ctx)
+        return ctx.respond.await_args.args[0]
+
+    async def test_nowplaying_shows_elapsed_and_total(self):
+        self.playing_now(185)
+        self.assertEqual(await self.nowplaying_reply(), "Currently Playing: Artist - Song 01:15/03:05")
+
+    async def test_nowplaying_with_unknown_length(self):
+        self.playing_now(0)
+        self.assertEqual(await self.nowplaying_reply(), "Currently Playing: Artist - Song 01:15/--:--")
+
+    async def test_nowplaying_with_no_length_or_artists(self):
+        self.playing_now(None, Artists=[])
+        self.assertEqual(await self.nowplaying_reply(), "Currently Playing: Song 01:15/--:--")
 
     async def test_search_helper_maps_user_search_types_to_jellyfin_types(self):
         calls = []

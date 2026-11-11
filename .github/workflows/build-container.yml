@@ -1,21 +1,144 @@
 name: Build Docker Container
+
+# Publishes ghcr.io/felix920506/jellychord. Nothing is pushed unless the unit
+# tests (tests.yml, called below) pass for the same commit.
+#
+# Tags (see README.md, "Image tags"):
+#   sha-<short>, sha-<short>-<arch>  every published commit; written once, never moved
+#   latest, latest-<arch>            head of main (only moved to the current head)
+#   X.Y.Z, X.Y                       release tags vX.Y.Z (X.Y is skipped for pre-releases);
+#                                    added to main's sha-<short> image, never rebuilt
+#
+# The E2E canary (e2e.yml) does not gate publishing: it talks to the real
+# Discord and Jellyfin, mostly catches Discord-side breakage that no commit
+# caused, and reports through GitHub issues instead.
+
 on:
   push:
     branches:
       - main
+    tags:
+      - 'v*'
   workflow_dispatch:
 
+# Queue runs per ref, so runs for main finish in push order. A re-run of an
+# older main commit is also kept off :latest (see generate-manifest).
+concurrency:
+  group: build-container-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/felix920506/jellychord
+
 jobs:
+  tests:
+    uses: ./.github/workflows/tests.yml
+    permissions:
+      contents: read
+
+  plan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      sha-tag: ${{ steps.tags.outputs.sha-tag }}
+      aliases: ${{ steps.tags.outputs.aliases }}
+      arch-aliases: ${{ steps.tags.outputs.arch-aliases }}
+      build: ${{ steps.existing.outputs.build }}
+    steps:
+      - name: checkout repo
+        uses: actions/checkout@v7
+
+      - name: work out tags
+        id: tags
+        env:
+          REF: ${{ github.ref }}
+          REF_NAME: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+        run: |
+          sha_tag="sha-${SHA::7}"
+          aliases=""
+          arch_aliases=""
+          case "$REF" in
+            refs/heads/main)
+              aliases="latest"
+              arch_aliases="latest"
+              ;;
+            refs/tags/v*)
+              version="${REF_NAME#v}"
+              if ! [[ "$version" =~ ^([0-9]+)\.([0-9]+)\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+                echo "::error::Tag $REF_NAME is not vX.Y.Z or vX.Y.Z-suffix"
+                exit 1
+              fi
+              project_version=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["tool"]["poetry"]["version"])')
+              if [ "$version" != "$project_version" ]; then
+                echo "::error::Tag $REF_NAME does not match the version in pyproject.toml ($project_version)"
+                exit 1
+              fi
+              aliases="$version"
+              if [ -z "${BASH_REMATCH[3]}" ]; then
+                aliases="$aliases ${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
+              fi
+              ;;
+          esac
+          {
+            echo "sha-tag=$sha_tag"
+            echo "aliases=$aliases"
+            echo "arch-aliases=$arch_aliases"
+          } >> "$GITHUB_OUTPUT"
+          echo "Publishing $sha_tag; aliases: ${aliases:-none}; per-arch aliases: ${arch_aliases:-none}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Log in to ghcr
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # sha-<short> is written once. If this commit was already published
+      # (by main, or a re-run), reuse that image instead of rebuilding it.
+      # Release tags never build: they only tag the image main already
+      # published, so a release is exactly what main shipped, and a tag run
+      # can't race main's run for the same commit (they queue separately).
+      # Only a confirmed "not found" counts as missing; any other error
+      # (auth, rate limit, network) fails the run rather than overwrite a tag.
+      - name: check for an existing image
+        id: existing
+        env:
+          SHA_TAG: ${{ steps.tags.outputs.sha-tag }}
+          REF: ${{ github.ref }}
+        run: |
+          if out=$(docker buildx imagetools inspect "$IMAGE:$SHA_TAG" 2>&1); then
+            echo "$IMAGE:$SHA_TAG already exists; reusing it" >> "$GITHUB_STEP_SUMMARY"
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          elif [[ "$out" == *"$IMAGE:$SHA_TAG: not found"* ]]; then
+            if [[ "$REF" == refs/tags/* ]]; then
+              echo "::error::$IMAGE:$SHA_TAG does not exist. Release tags reuse the image built from main: wait for this commit's main build to finish, then re-run this workflow."
+              exit 1
+            fi
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "$out"
+            echo "::error::Could not check whether $IMAGE:$SHA_TAG exists"
+            exit 1
+          fi
+
   generate-requirements-txt:
     runs-on: ubuntu-latest
+    needs: [tests, plan]
+    if: needs.plan.outputs.build == 'true'
     steps:
       - name: checkout repo
         uses: actions/checkout@v7
 
       - name: setup python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
-          python-version: 3.12
+          python-version: 3.14
 
       - name: install poetry
         run: python3 -m pip install poetry
@@ -34,7 +157,12 @@ jobs:
 
   build-and-publish-amd64:
     runs-on: ubuntu-latest
-    needs: generate-requirements-txt
+    needs: [plan, generate-requirements-txt]
+    permissions:
+      contents: read
+      packages: write
+    env:
+      TAG: ${{ needs.plan.outputs.sha-tag }}-amd64
     steps:
       - name: Checkout repo
         uses: actions/checkout@v7
@@ -55,14 +183,19 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: build amd64 image
-        run: docker build -t ghcr.io/felix920506/jellychord:latest-amd64 --platform linux/amd64 .
+        run: docker build -t "$IMAGE:$TAG" --platform linux/amd64 .
 
       - name: push amd64 image
-        run: docker push ghcr.io/felix920506/jellychord:latest-amd64
-  
+        run: docker push "$IMAGE:$TAG"
+
   build-and-publish-arm64:
     runs-on: ubuntu-24.04-arm
-    needs: generate-requirements-txt
+    needs: [plan, generate-requirements-txt]
+    permissions:
+      contents: read
+      packages: write
+    env:
+      TAG: ${{ needs.plan.outputs.sha-tag }}-arm64
     steps:
       - name: Checkout repo
         uses: actions/checkout@v7
@@ -83,14 +216,25 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: build arm64 image
-        run: docker build -t ghcr.io/felix920506/jellychord:latest-arm64 --platform linux/arm64 .
+        run: docker build -t "$IMAGE:$TAG" --platform linux/arm64 .
 
       - name: push arm64 image
-        run: docker push ghcr.io/felix920506/jellychord:latest-arm64
-  
+        run: docker push "$IMAGE:$TAG"
+
   generate-manifest:
     runs-on: ubuntu-latest
-    needs: [build-and-publish-arm64, build-and-publish-amd64]
+    needs: [tests, plan, build-and-publish-arm64, build-and-publish-amd64]
+    # Runs after fresh builds, or straight after `plan` when the image exists.
+    if: >-
+      ${{ !cancelled()
+        && needs.tests.result == 'success'
+        && needs.plan.result == 'success'
+        && (needs.plan.outputs.build != 'true'
+            || (needs.build-and-publish-amd64.result == 'success'
+                && needs.build-and-publish-arm64.result == 'success')) }}
+    permissions:
+      contents: read
+      packages: write
     steps:
       - name: setup docker buildx
         uses: docker/setup-buildx-action@v4
@@ -102,15 +246,43 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Pull AMD64 image
-        run: docker pull ghcr.io/felix920506/jellychord:latest-amd64
-
-      - name: Pull ARM64 image
-        run: docker pull ghcr.io/felix920506/jellychord:latest-arm64
-
       - name: Create and push manifest images
+        env:
+          BUILD: ${{ needs.plan.outputs.build }}
+          SHA_TAG: ${{ needs.plan.outputs.sha-tag }}
+          ALIASES: ${{ needs.plan.outputs.aliases }}
+          ARCH_ALIASES: ${{ needs.plan.outputs.arch-aliases }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          docker manifest create ghcr.io/felix920506/jellychord:latest \
-            ghcr.io/felix920506/jellychord:latest-amd64 \
-            ghcr.io/felix920506/jellychord:latest-arm64
-          docker manifest push ghcr.io/felix920506/jellychord:latest
+          set -euo pipefail
+          if [ "$BUILD" = "true" ]; then
+            docker buildx imagetools create -t "$IMAGE:$SHA_TAG" \
+              "$IMAGE:$SHA_TAG-amd64" \
+              "$IMAGE:$SHA_TAG-arm64"
+          fi
+          # Only the current head of main may become latest. This keeps a
+          # re-run of an older main commit from moving latest backwards.
+          if [[ " $ALIASES $ARCH_ALIASES " == *" latest "* ]]; then
+            main_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)
+            if [ "$main_sha" != "$GITHUB_SHA" ]; then
+              echo "::warning::main is now at $main_sha, not $GITHUB_SHA; leaving latest alone"
+              ALIASES=$(echo "$ALIASES" | tr ' ' '\n' | grep -vx latest | tr '\n' ' ' || true)
+              ARCH_ALIASES=$(echo "$ARCH_ALIASES" | tr ' ' '\n' | grep -vx latest | tr '\n' ' ' || true)
+            fi
+          fi
+          for alias in $ARCH_ALIASES; do
+            for arch in amd64 arm64; do
+              docker buildx imagetools create -t "$IMAGE:$alias-$arch" "$IMAGE:$SHA_TAG-$arch"
+            done
+          done
+          tags=()
+          for alias in $ALIASES; do
+            tags+=(-t "$IMAGE:$alias")
+          done
+          if [ "${#tags[@]}" -gt 0 ]; then
+            docker buildx imagetools create "${tags[@]}" "$IMAGE:$SHA_TAG"
+          fi
+          {
+            echo "Pushed:"
+            for t in $SHA_TAG $ALIASES; do echo "- \`$IMAGE:$t\`"; done
+          } >> "$GITHUB_STEP_SUMMARY"

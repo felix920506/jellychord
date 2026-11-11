@@ -48,6 +48,35 @@ services:
 
 This can also be found in the repository as `compose.yaml`
 
+#### Image tags
+
+Images are published to `ghcr.io/felix920506/jellychord` only after the unit tests pass for that commit.
+
+| Tag | Points to | Moves? |
+| --- | --- | --- |
+| `latest` | the newest commit on `main` whose tests passed | yes, on each push to `main` that passes the tests |
+| `sha-<commit>` (for example `sha-1de0eab`) | one commit, by the first 7 characters of its hash | no |
+| `X.Y.Z` (for example `0.1.0`) | release `vX.Y.Z` | no |
+| `X.Y` (for example `0.1`) | the newest `X.Y.*` release (not set for pre-releases) | yes, on each `X.Y.*` release |
+
+Each tag is a multi-arch image (amd64 and arm64). Single-architecture tags are also published as `latest-amd64`, `latest-arm64`, `sha-<commit>-amd64` and `sha-<commit>-arm64`. Releases do not move `latest`.
+
+To pin a version, or roll back after a bad update, replace `latest` in your compose file with a release or commit tag and recreate the container:
+
+```yml
+    image: ghcr.io/felix920506/jellychord:sha-1de0eab
+```
+
+```sh
+docker compose pull && docker compose up -d
+```
+
+The available tags are listed on the [package page](https://github.com/felix920506/jellychord/pkgs/container/jellychord). Switch back to `latest` to follow `main` again.
+
+To build the image yourself, or to see how images and releases are published, read [README.Docker.md](README.Docker.md).
+
+Logs go to stderr at the `INFO` level by default. Set `JELLYCHORD_LOG_LEVEL` (`DEBUG`, `INFO`, `WARNING`, `ERROR`) to change it.
+
 You will need to create a Discord bot account to run this application.
 
 ### Directly from source
@@ -66,16 +95,35 @@ Steps:
 5. Create a Jellyfin API key in the dashboard and supply it in `config.yml`
 6. Open a terminal in the bot folder
 7. run `poetry install` to install dependencies
-8. Open a terminal in the bot folder
-9. run `poetry run python3 main.py` to start the bot. You may need to run `poetry run python main.py` if you are on Windows.
-10. Press `Ctrl+C` in the terminal window to exit the bot. MacOS uses the same key bind.
+8. run `poetry run python3 main.py` to start the bot. You may need to run `poetry run python main.py` if you are on Windows.
+9. Press `Ctrl+C` in the terminal window to exit the bot. MacOS uses the same key bind.
+
+### Settings
+
+The same settings are read from `config.yml`, or from environment variables when `JELLYCHORD_USE_CONF_FILE` is `0` (the docker image sets this).
+
+| `config.yml` key | Environment variable | Default |
+| --- | --- | --- |
+| `discord-token` | `JELLYCHORD_DC_TOKEN` | required |
+| `jf-server` | `JELLYCHORD_JF_SERVER` | required |
+| `jf-apikey` | `JELLYCHORD_JF_APIKEY` | required |
+| `command-group` | `JELLYCHORD_COMMAND_GROUP` | `jellychord` |
+| `search-limit` | `JELLYCHORD_SEARCH_LIMIT` | `25` (kept between 1 and 25) |
+| `fairplay` | `JELLYCHORD_ENABLE_FAIRPLAY` (`1` to enable) | off |
+| `log-level` | `JELLYCHORD_LOG_LEVEL` | `INFO` |
+| `enable-debug` | `JELLYCHORD_ENABLE_DEBUG` (`1` to enable) | off |
+| `debug-server` | `JELLYCHORD_DEBUG_SERVER` | required when debug mode is on |
+
+In `config.yml`, `fairplay` and `enable-debug` take `true`/`false` (also `yes`/`no`, `on`/`off`, `1`/`0`, quoted or not).
+
+If a required setting is missing or a setting has an invalid value, the bot exits at startup with a message naming the setting(s).
 
 ## Commands
 
 This list will assume the default prefix of `jellychord`. This can be changed in the config.
 
 - `/jellychord search <term> <type> <when>`
-  Search for a list of items using `<term>`. Options for `<when>` term: `now` stops current track and plays the specified track. `next` places the specified track next in the queue. `last` is the default behavior, places the specified track at the end of the playlist.
+  Search for a list of items using `<term>`. Options for `<when>` term: `now` stops current track and plays the specified track (not available in fairplay mode, since it would skip other users' tracks). `next` places the specified track next in the queue. `last` is the default behavior, places the specified track at the end of the playlist.
 - `/jellychord play <term> <type> <when>`
   Parameters work the same as the above command, except it directly uses the first result returned from the server, instead of asking the user to choose from a list of options
 - `/jellychord skip`
@@ -99,7 +147,7 @@ This list will assume the default prefix of `jellychord`. This can be changed in
 - `/jellychord clear`
   Clears the queue for the current Discord server.
 - `/jellychord radio <mode> <library>`
-  Turns radio mode on or off. Options for `<mode>`: `song` plays a random song whenever the queue is empty. `album` picks a random album and plays its tracks in album order, then picks another. `off` turns radio off, playback ends after the current track and the queue. `<library>` is optional and limits radio to one music library, all libraries are used when omitted. Radio plays nonstop until it is turned off or `/jellychord stop` is used. Tracks queued while radio is on play after the current track, then radio continues once the queue is empty. All other commands work the same as without radio.
+  Turns radio mode on or off. Options for `<mode>`: `song` plays a random song whenever the queue is empty. `album` picks a random album and plays its tracks in album order, then picks another. `off` turns radio off, playback ends after the current track and the queue. `<library>` is optional and limits radio to one music library, all libraries are used when omitted. Radio plays nonstop until it is turned off, `/jellychord stop` is used or the bot leaves the voice channel. Tracks queued while radio is on play after the current track, then radio continues once the queue is empty. All other commands work the same as without radio.
 - `/jellychord promote <index>`
   Promotes the item at the specified index from the playlist to the front. Index starts with 1.
 - `/jellychord demote <index>`

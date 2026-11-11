@@ -2,5 +2,35 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
     "config:recommended"
+  ],
+  "minimumReleaseAge": "7 days",
+  "packageRules": [
+    {
+      "description": "Python minor/major bumps must change pyproject.toml, poetry.lock, the Dockerfile and every workflow together. Renovate can't regenerate poetry.lock for a Python bump, so group them into one PR that is only created when approved on the Dependency Dashboard.",
+      "matchManagers": ["poetry", "pep621", "dockerfile", "github-actions"],
+      "matchDepNames": ["python"],
+      "matchUpdateTypes": ["major", "minor"],
+      "groupName": "Python",
+      "dependencyDashboardApproval": true,
+      "prBodyNotes": [
+        "**Before merging:** Renovate cannot update `poetry.lock` for a Python bump. Check that py-cord (and davey) support the new version, run `poetry lock` on this branch and push it, and update the Python version in `tests/e2e/README.md`."
+      ]
+    },
+    {
+      "description": "Keep Python patch bumps of the Docker base image as their own PR, so a pending minor bump doesn't hold them back.",
+      "matchManagers": ["dockerfile"],
+      "matchDepNames": ["python"],
+      "separateMinorPatch": true
+    }
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Jellyfin image pinned for the E2E canary",
+      "managerFilePatterns": ["/^tests/e2e/run\\.mjs$/"],
+      "matchStrings": ["DEFAULT_JELLYFIN_IMAGE = '(?<depName>jellyfin/jellyfin):(?<currentValue>[^']+)'"],
+      "datasourceTemplate": "docker",
+      "versioningTemplate": "regex:^(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)-(?<build>\\d+)$"
+    }
   ]
 }
