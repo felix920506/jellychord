@@ -577,6 +577,16 @@ class RadioCommandTests(RadioTestCase):
 
         self.assertEqual(stopped_before_play, [True])
         self.assertTrue(self.voice_client.stopped)
+        self.assertIn(42, self.main.playerActive)
+
+        # stopping the player makes it call back like at the end of any track, that ends the session
+        _, after = self.voice_client.play_calls[0]
+        after(None)
+
+        self.assertEqual(len(self.voice_client.play_calls), 1)
+        self.assertNotIn(42, self.main.playing)
+        self.assertNotIn(42, self.main.playerActive)
+        self.assertTrue(self.voice_client.disconnect_requested)
 
     async def test_radio_on_starts_playback_when_connected_but_idle(self):
         api = self.use_api(songs=[raw_track("random-1")])
