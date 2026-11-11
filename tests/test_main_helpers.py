@@ -107,6 +107,8 @@ def make_discord_stub():
     discord.Bot = FakeBot
     discord.Option = option
     discord.SelectOption = lambda *args, **kwargs: {"args": args, "kwargs": kwargs}
+    discord.OptionChoice = lambda name, value: {"name": name, "value": value}
+    discord.AutocompleteContext = type("AutocompleteContext", (), {})
     discord.ApplicationContext = type("ApplicationContext", (), {})
     discord.Interaction = type("Interaction", (), {})
     discord.Guild = type("Guild", (), {})

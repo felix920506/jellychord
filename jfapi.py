@@ -34,17 +34,17 @@ class JFAPI():
     # Raises aiohttp.ClientResponseError if Jellyfin answers with an HTTP error
     # (or a non-JSON content type), JellyfinResponseError if a success body
     # isn't JSON with an 'Items' list.
-    async def __getItems(self, params: dict) -> list:
+    async def __getItems(self, params: dict, endpoint: str = '/Items') -> list:
         await self.checkSession()
-        async with self._session.get(self.__getEndpointUrl('/Items'), params=params) as res:
+        async with self._session.get(self.__getEndpointUrl(endpoint), params=params) as res:
             res.raise_for_status()
             try:
                 body = await res.json()
             except ValueError as e:  # json.JSONDecodeError
-                raise JellyfinResponseError(f'GET /Items returned invalid JSON: {e}') from e
+                raise JellyfinResponseError(f'GET {endpoint} returned invalid JSON: {e}') from e
         items = body.get('Items') if isinstance(body, dict) else None
         if not isinstance(items, list):
-            raise JellyfinResponseError("GET /Items response has no 'Items' list")
+            raise JellyfinResponseError(f"GET {endpoint} response has no 'Items' list")
         return items
 
     # https://api.jellyfin.org/#tag/Items/operation/GetItems
@@ -98,3 +98,25 @@ class JFAPI():
         }
         return await self.__getItems(params)
 
+    # Gets random items of one type, optionally from one library only
+    # GET /Items
+    async def getRandomItems(self, itemType: str, libraryId: str | None = None, limit: int = 1):
+        params = {
+            'ApiKey': self.__apikey,
+            'includeItemTypes': itemType,
+            'recursive': 'true',
+            'sortBy': 'Random',
+            'limit': limit
+        }
+        if libraryId:
+            params['parentId'] = libraryId
+        return await self.__getItems(params)
+
+    # Gets the server's music libraries
+    # GET /Library/MediaFolders
+    async def getMusicLibraries(self):
+        params = {
+            'ApiKey': self.__apikey
+        }
+        folders = await self.__getItems(params, '/Library/MediaFolders')
+        return [f for f in folders if isinstance(f, dict) and f.get('CollectionType') == 'music']
