@@ -3,6 +3,7 @@
   "extends": [
     "config:recommended"
   ],
+  "minimumReleaseAge": "7 days",
   "packageRules": [
     {
       "description": "Python minor/major bumps must change pyproject.toml, poetry.lock, the Dockerfile and every workflow together. Renovate can't regenerate poetry.lock for a Python bump, so group them into one PR that is only created when approved on the Dependency Dashboard.",
