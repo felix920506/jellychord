@@ -67,6 +67,19 @@ function isOutage(report) {
   return Boolean(s && !s.error && ((s.indicator && s.indicator !== 'none') || s.incidents?.length));
 }
 
+// What the `latest` track actually upgraded, from the versions the bot reported
+// on the `locked` and `latest` tracks: [{ name, from, to }]. Empty when either
+// track did not get far enough to report its versions.
+export function changedDependencies(reports) {
+  const locked = reports.locked?.meta?.sutVersions;
+  const latest = reports.latest?.meta?.sutVersions;
+  if (!locked || !latest || locked.error || latest.error) return [];
+  return Object.keys(latest)
+    .filter((name) => name !== 'python' && locked[name] && latest[name] && locked[name] !== latest[name])
+    .sort()
+    .map((name) => ({ name, from: locked[name], to: latest[name] }));
+}
+
 function statusTable(reports) {
   const lines = ['| Build | Result |', '|---|---|'];
   for (const [track, r] of Object.entries(reports)) {
@@ -115,10 +128,17 @@ export function renderIssue(group, reports, { runUrl, date, technical }) {
       "> If your bot recently stopped working, this is probably why, and the maintainers have been notified. Please don't open a duplicate. Subscribe to this issue to hear when it's fixed (a 👍 reaction helps show impact). It closes automatically once the tests pass again.",
     );
   } else if (group.kind === 'upcoming') {
-    title = `[Automated] Newest py-cord breaks: ${layer.title.charAt(0).toLowerCase()}${layer.title.slice(1)}`;
+    // Name what actually changed: the newest py-cord and davey are installed
+    // together, and often only one of them has a new release.
+    const changed = changedDependencies(reports);
+    const names = changed.length ? changed.map((c) => c.name).join(' / ') : 'py-cord / davey';
+    const releases = changed.length
+      ? changed.map((c) => `${c.name} ${c.to} (\`poetry.lock\` has ${c.from})`).join(' and ')
+      : 'the newest py-cord / davey releases';
+    title = `[Automated] Newest ${names} ${changed.length === 1 ? 'breaks' : 'break'}: ${layer.title.charAt(0).toLowerCase()}${layer.title.slice(1)}`;
     lines.push(
       '> [!NOTE]',
-      '> **Opened automatically by the end-to-end tests.** The released bot still works. This failure only happens with the newest py-cord / davey releases, so hold off on that dependency update until it is resolved.',
+      `> **Opened automatically by the end-to-end tests.** The released bot still works. This failure only happens with ${releases}, so hold off on that dependency update until it is resolved.`,
     );
   } else {
     title = '[Automated] E2E test harness is broken';

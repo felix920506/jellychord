@@ -81,6 +81,8 @@ comments on, or closes issues labelled `e2e-canary`:
   failing layer. If `latest` passes, the issue says a dependency update
   should fix it.
 * **Only `latest` broken.** Opens a maintainer issue: hold off on that update.
+  The title and text name the packages whose version differs from the
+  `locked` run (for example davey), when both runs reported their versions.
 * **Harness broken.** Opens an issue with the extra label `e2e-harness`.
 * **Discord status page reported an incident.** Adds the `possible-outage`
   label.

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { issueKeys, keyOfIssue, normalizeReports, planIssueActions, renderIssue } from './canary-issue.mjs';
+import { changedDependencies, issueKeys, keyOfIssue, normalizeReports, planIssueActions, renderIssue } from './canary-issue.mjs';
 import { LAYERS } from './report.mjs';
 
 const pass = () => ({ ok: true, diagnostics: {}, meta: {} });
@@ -46,8 +46,33 @@ test('only newest deps failing is an "upcoming" maintainer issue, not a user-fac
   const groups = issueKeys(reports);
   assert.deepEqual(groups.map((g) => g.key), ['upcoming:gateway']);
   const issue = renderIssue(groups[0], reports, ctx);
-  assert.match(issue.title, /Newest py-cord breaks/);
+  assert.match(issue.title, /Newest py-cord \/ davey break: /);
+  assert.match(issue.body, /only happens with the newest py-cord \/ davey releases/);
   assert.doesNotMatch(issue.body, /probably why/);
+});
+
+test('"upcoming" issue names the dependency that differs from the locked build', () => {
+  const versions = (davey) => ({ meta: { sutVersions: { PyNaCl: '1.6.2', aiohttp: '3.13.5', davey, 'py-cord': '2.8.1', python: '3.14.10' } } });
+  const reports = {
+    image: pass(),
+    locked: { ...pass(), ...versions('0.1.5') },
+    latest: { ...fail('voice-encryption'), ...versions('0.2.0') },
+  };
+  assert.deepEqual(changedDependencies(reports), [{ name: 'davey', from: '0.1.5', to: '0.2.0' }]);
+  const issue = renderIssue(issueKeys(reports)[0], reports, ctx);
+  assert.equal(issue.title, '[Automated] Newest davey breaks: voice encryption (DAVE / transport) negotiation with Discord is failing');
+  assert.match(issue.body, /only happens with davey 0\.2\.0 \(`poetry\.lock` has 0\.1\.5\), so hold off/);
+  assert.doesNotMatch(issue.body, /py-cord \d/);
+});
+
+test('changed dependencies are unknown when a track could not report its versions', () => {
+  const latest = { ...fail('gateway'), meta: { sutVersions: { error: 'timed out' } } };
+  const locked = { ...pass(), meta: { sutVersions: { davey: '0.1.5', 'py-cord': '2.8.1' } } };
+  assert.deepEqual(changedDependencies({ image: pass(), locked, latest }), []);
+  assert.deepEqual(changedDependencies({ image: pass(), latest: { ...fail('gateway'), meta: { sutVersions: { davey: '0.2.0' } } } }), []);
+  // A different Python on the two tracks is not a dependency release.
+  const python = (v) => ({ meta: { sutVersions: { davey: '0.1.5', python: v } } });
+  assert.deepEqual(changedDependencies({ locked: { ...pass(), ...python('3.14.9') }, latest: { ...fail('gateway'), ...python('3.14.10') } }), []);
 });
 
 test('harness failures are labelled separately', () => {
