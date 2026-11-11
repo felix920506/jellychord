@@ -15,7 +15,7 @@ const repo = process.env.GITHUB_REPOSITORY;
 const token = process.env.GITHUB_TOKEN;
 const runUrl = process.env.RUN_URL ?? '';
 const dryRun = process.env.DRY_RUN === '1';
-const expected = (process.env.EXPECTED_TRACKS ?? 'image,locked,latest').split(',').map((s) => s.trim()).filter(Boolean);
+const expected = (process.env.EXPECTED_TRACKS ?? 'image,locked').split(',').map((s) => s.trim()).filter(Boolean);
 
 async function gh(method, endpoint, body) {
   const res = await fetch(`https://api.github.com/repos/${repo}${endpoint}`, {

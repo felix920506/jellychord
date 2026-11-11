@@ -64,23 +64,24 @@ daily on GitHub Actions and opens a GitHub issue when something breaks.
 
 ## CI
 
-`.github/workflows/e2e.yml` runs three **tracks**, one at a time because they
+`.github/workflows/e2e.yml` runs two **tracks**, one at a time because they
 share the voice channel:
 
 | Track | What | When |
 |---|---|---|
 | `image` | published `ghcr.io/felix920506/jellychord:latest` (arm64 runner) | daily, manual |
 | `locked` | source with `poetry.lock` | daily, manual, PRs, pushes to `main` |
-| `latest` | source with the newest py-cord/davey, pre-releases included | daily, manual |
+
+No track installs dependencies newer than `poetry.lock`. A dependency update
+is tested when its pull request is opened (Renovate's included), by the
+`locked` track.
 
 A failure is retried once (after 10 min on scheduled runs) to ride out short
 blips. On scheduled and manual runs on `main`, the `report` job then opens,
 comments on, or closes issues labelled `e2e-canary`:
 
 * **`image`/`locked` broken.** Opens a user-facing issue titled after the
-  failing layer. If `latest` passes, the issue says a dependency update
-  should fix it.
-* **Only `latest` broken.** Opens a maintainer issue: hold off on that update.
+  failing layer.
 * **Harness broken.** Opens an issue with the extra label `e2e-harness`.
 * **Discord status page reported an incident.** Adds the `possible-outage`
   label.

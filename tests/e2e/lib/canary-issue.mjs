@@ -4,7 +4,6 @@
 // Tracks:
 //   image  - the published Docker image (what most users run)
 //   locked - source checkout with poetry.lock (what the next image will contain)
-//   latest - source checkout with the newest py-cord/davey (incl. pre-releases)
 
 import { LAYERS } from './report.mjs';
 
@@ -16,7 +15,6 @@ const KEY_MARKER = /<!-- e2e-canary-key: (\S+) -->/;
 export const TRACK_NAMES = {
   image: 'Released Docker image (`ghcr.io/felix920506/jellychord:latest`)',
   locked: 'Source with locked dependencies (`poetry.lock`)',
-  latest: 'Source with the newest py-cord / davey releases',
 };
 
 // A missing report means the job died before writing one: a harness failure.
@@ -47,12 +45,10 @@ export function issueKeys(reports) {
     if (!keys.has(key)) keys.set(key, { key, kind, layer, tracks: [] });
     keys.get(key).tracks.push(track);
   };
-  const releasedFailing = ['image', 'locked'].filter((t) => reports[t] && !reports[t].ok);
   for (const [track, report] of Object.entries(reports)) {
     if (report.ok) continue;
     const { layer, component } = report.failure;
     if (component === 'harness') add('harness', 'harness', layer, track);
-    else if (track === 'latest' && !releasedFailing.some((t) => reports[t].failure.layer === layer)) add(`upcoming:${layer}`, 'upcoming', layer, track);
     else add(`bot:${layer}`, 'bot', layer, track);
   }
   return [...keys.values()];
@@ -74,14 +70,6 @@ function statusTable(reports) {
     lines.push(`| ${TRACK_NAMES[track] ?? track} | ${result} |`);
   }
   return lines.join('\n');
-}
-
-function workaround(reports, kind) {
-  if (kind !== 'bot') return null;
-  if (reports.latest?.ok) {
-    return 'The newest py-cord release appears to fix this, so a dependency update is needed. If you run from source, upgrading py-cord (`pip install -U --pre "py-cord[voice]"`) may work in the meantime.';
-  }
-  return 'None known yet.';
 }
 
 function discordStatusText(report) {
@@ -114,12 +102,6 @@ export function renderIssue(group, reports, { runUrl, date, technical }) {
       '>',
       "> If your bot recently stopped working, this is probably why, and the maintainers have been notified. Please don't open a duplicate. Subscribe to this issue to hear when it's fixed (a 👍 reaction helps show impact). It closes automatically once the tests pass again.",
     );
-  } else if (group.kind === 'upcoming') {
-    title = `[Automated] Newest py-cord breaks: ${layer.title.charAt(0).toLowerCase()}${layer.title.slice(1)}`;
-    lines.push(
-      '> [!NOTE]',
-      '> **Opened automatically by the end-to-end tests.** The released bot still works. This failure only happens with the newest py-cord / davey releases, so hold off on that dependency update until it is resolved.',
-    );
   } else {
     title = '[Automated] E2E test harness is broken';
     lines.push(
@@ -129,8 +111,7 @@ export function renderIssue(group, reports, { runUrl, date, technical }) {
   }
 
   lines.push('', "### What's broken", primary.failure.description ?? layer.description, '', '### Status', statusTable(reports), '');
-  const wa = workaround(reports, group.kind);
-  if (wa) lines.push(`**Workaround:** ${wa}`, '');
+  if (group.kind === 'bot') lines.push('**Workaround:** None known yet.', '');
   if (outage) lines.push('> [!IMPORTANT]', '> Discord was reporting an incident when this failed, so this may be a temporary Discord outage and not a breaking change.', '');
   lines.push(`**Discord status at time of failure:** ${discordStatusText(primary)}`, `**Detected:** ${date} ([workflow run](${runUrl}))`, '');
   if (technical) lines.push('<details><summary>Technical details</summary>', '', technical, '', '</details>');
