@@ -62,9 +62,12 @@ jobs:
           echo "enabled=true" >> "$GITHUB_OUTPUT"
 
           # PRs and pushes: test the code being changed. Schedule / manual runs on
-          # main: everything, including the image users actually run.
+          # main: also the image users actually run.
+          # Dependency updates are tested on their own (Renovate) PR by the
+          # locked track. Nothing here installs versions newer than poetry.lock:
+          # that would run freshly published packages with the bot tokens.
           if [ "$EVENT" = "schedule" ] || [ "$EVENT" = "workflow_dispatch" ]; then
-            tracks="image locked latest"
+            tracks="image locked"
           else
             tracks="locked"
           fi
@@ -78,7 +81,6 @@ jobs:
             case "$t" in
               image)  echo '{"track":"image","mode":"docker","runner":"ubuntu-24.04-arm"}' ;;
               locked) echo '{"track":"locked","mode":"source","runner":"ubuntu-latest"}' ;;
-              latest) echo '{"track":"latest","mode":"source","runner":"ubuntu-latest"}' ;;
             esac
           done | jq -sc .)
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
@@ -128,10 +130,6 @@ jobs:
           python3 -m pip install poetry
           poetry install --no-root
           echo "E2E_PYTHON=$(poetry env info -p)/bin/python" >> "$GITHUB_ENV"
-
-      - name: upgrade to newest py-cord / davey
-        if: matrix.track == 'latest'
-        run: poetry run pip install --upgrade --pre "py-cord[voice]" davey
 
       - name: pull released image
         if: matrix.mode == 'docker'
