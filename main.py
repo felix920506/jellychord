@@ -63,7 +63,8 @@ playing = {}
 # radio state per guild, only present while radio is on:
 # mode: 'song' or 'album', libraryId: library to pick from (None for all),
 # libraryName: display name, buffer: remaining tracks of the current album,
-# album: name of the album the buffer came from, failures: consecutive failures,
+# album: name of the album the buffer came from, failures: tracks that failed in a row,
+# a change of mode or library always stores a new dict, the player notices by identity
 # channel: text channel to notify if radio has to turn itself off
 radioStates = {}
 # guilds that have a playback chain running (a track playing, paused, loading or waiting to retry)
@@ -216,6 +217,8 @@ def fillRadioBuffer(state: dict, loop):
         if not albums:
             raise RuntimeError('No albums found for radio')
         tracks = runOnLoop(JF_APICLIENT.getAlbumTracks(albums[0]['Id']), loop)
+        # an album folder can hold more than its songs
+        tracks = [t for t in tracks if t.get('Type', 'Audio') == 'Audio']
         if not tracks:
             raise RuntimeError(f'Radio album has no tracks: {albums[0]["Name"]}')
         album = albums[0]['Name']
@@ -270,13 +273,16 @@ def startPlayback(guild, vc, state: dict = None, stopCount: int = 0) -> bool:
     except Exception:
         audio.cleanup()
         raise
+    if stopCounts.get(guild.id, 0) != stopCount:
+        # stop arrived between the check above and the track starting, when there was nothing to stop yet
+        vc.stop()
     return True
 
-def handleRadioFailure(guild, vc, state: dict, error: Exception):
+def handleRadioFailure(guild, vc, state: dict, error: Exception, source: str = 'radio'):
     # called when picking or starting a track failed while radio is on
-    # waits before the next attempt, turns radio off after too many failures in a row
+    # waits before the next attempt, turns radio off after too many failed tracks in a row
     state['failures'] += 1
-    log.warning('Radio failure %s/%s in guild %s: %r', state['failures'], RADIO_MAX_FAILURES, guild.id, error)
+    log.warning('Could not play %s track in guild %s, failure %s/%s: %r', source, guild.id, state['failures'], RADIO_MAX_FAILURES, error)
     if state['failures'] >= RADIO_MAX_FAILURES:
         if radioStates.get(guild.id) is state:
             radioStates.pop(guild.id)
@@ -299,12 +305,13 @@ def handleRadioFailure(guild, vc, state: dict, error: Exception):
 
 def playNextTrack(guild, error=None):
     playerActive.add(guild.id)
-    started = False
     try:
-        started = advancePlayback(guild)
-    finally:
-        if not started:
-            playerActive.discard(guild.id)
+        advancePlayback(guild)
+    except BaseException:
+        # when playback ends normally advancePlayback clears the mark itself, at the right moment
+        # doing it here as well could clear the mark of a chain that was started right after
+        playerActive.discard(guild.id)
+        raise
 
 def advancePlayback(guild) -> bool:
     # starts the next track, returns False if playback ended instead
@@ -316,6 +323,7 @@ def advancePlayback(guild) -> bool:
             # voice connection is gone, nothing left to play to
             playing.pop(guild.id, None)
             radioStates.pop(guild.id, None)
+            playerActive.discard(guild.id)
             return False
 
         state = radioStates.get(guild.id)
@@ -340,16 +348,14 @@ def advancePlayback(guild) -> bool:
         except Exception as e:
             if state is None:
                 raise
-            # nothing is playing while radio moves on or waits to try again
+            # nothing is playing while radio waits to try again
             playing.pop(guild.id, None)
-            if fromQueue:
-                # a queued track that fails is dropped, it says nothing about radio
-                log.warning('Could not play queued track in guild %s: %r', guild.id, e)
-            else:
-                handleRadioFailure(guild, vc, state, e)
+            # a queued track that fails is dropped and counted the same way as a radio track,
+            # so a server that is down can not make the player spin through the whole queue
+            handleRadioFailure(guild, vc, state, e, 'queued' if fromQueue else 'radio')
             continue
 
-        if state is not None and not fromQueue:
+        if state is not None:
             state['failures'] = 0
         return True
 
