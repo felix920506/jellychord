@@ -5,6 +5,8 @@ import yaml
 import random
 import datetime
 import os
+import time
+import logging
 from itertools import zip_longest
 
 from jfapi import JFAPI
@@ -47,8 +49,24 @@ if DEBUG:
     DEBUG_SERVER = config["debug-server"]
 PLAYLIST_PAGESIZE = 20
 
+# radio mode tuning
+RADIO_FETCH_TIMEOUT = 30    # seconds to wait for the Jellyfin server when picking a radio item
+RADIO_MAX_FAILURES = 5      # consecutive failures before radio turns itself off
+RADIO_BACKOFF_BASE = 2      # seconds, doubles after each consecutive failure
+RADIO_BACKOFF_MAX = 30      # seconds
+LIBRARY_CACHE_SECS = 60
+
+log = logging.getLogger('jellychord')
+
 queues = {}
 playing = {}
+# radio state per guild, only present while radio is on:
+# mode: 'song' or 'album', libraryId: library to pick from (None for all),
+# libraryName: display name, buffer: remaining tracks of the current album,
+# album: name of the album the buffer came from, failures: consecutive failures,
+# channel: text channel to notify if radio has to turn itself off
+radioStates = {}
+musicLibraryCache = {'time': None, 'items': []}
 
 bot = discord.Bot()
 
@@ -131,49 +149,171 @@ async def playTrack(guild: discord.Guild):
     else:
         await asyncio.to_thread(playNextTrack, guild)
 
-def playNextTrack(guild, error=None):
-    vc = guild.voice_client
-    br = vc.channel.bitrate
+def takeQueueTrack(guild):
+    # moves the next track of the queue into playing
     fairplay = config.get('fairplay')
     global playing
     global queues
-    if guild.id in queues:
-        thisTrackUser = None
-        if fairplay:
-            thisTrackUserIdx = playing[guild.id].get('nextTrackUserIdx', 0) % len(queues[guild.id]) if guild.id in playing else 0
-            thisTrackUser = list(queues[guild.id].keys())[thisTrackUserIdx]
-        # grab the next item off the queue to play
-        playing[guild.id] = queues[guild.id].pop(0) if not fairplay else queues[guild.id][thisTrackUser].pop(0)
+    thisTrackUser = None
+    if fairplay:
+        thisTrackUserIdx = playing[guild.id].get('nextTrackUserIdx', 0) % len(queues[guild.id]) if guild.id in playing else 0
+        thisTrackUser = list(queues[guild.id].keys())[thisTrackUserIdx]
+    # grab the next item off the queue to play
+    playing[guild.id] = queues[guild.id].pop(0) if not fairplay else queues[guild.id][thisTrackUser].pop(0)
 
-        playing[guild.id]['playtime-offset'] = datetime.timedelta()
-        if fairplay:
-            # find the next user to play from
-            userIds = list(queues[guild.id].keys())
-            thisIdx = userIds.index(thisTrackUser) if thisTrackUser in userIds else -1
-            nextIdx = (thisIdx + 1) % len(userIds)
+    playing[guild.id]['playtime-offset'] = datetime.timedelta()
+    if fairplay:
+        # find the next user to play from
+        userIds = list(queues[guild.id].keys())
+        thisIdx = userIds.index(thisTrackUser) if thisTrackUser in userIds else -1
+        nextIdx = (thisIdx + 1) % len(userIds)
 
-            # clean up any empty queues for users
-            if not queues[guild.id][thisTrackUser]:
-                queues[guild.id].pop(thisTrackUser)
-                nextIdx -= 1
+        # clean up any empty queues for users
+        if not queues[guild.id][thisTrackUser]:
+            queues[guild.id].pop(thisTrackUser)
+            nextIdx -= 1
 
-            playing[guild.id]['nextTrackUserIdx'] = nextIdx
+        playing[guild.id]['nextTrackUserIdx'] = nextIdx
 
-        if not queues[guild.id]: 
-            queues.pop(guild.id)
+    if not queues[guild.id]: 
+        queues.pop(guild.id)
 
-        if fairplay:
-            playing[guild.id]['nextTrackUser'] = None
+    if fairplay:
+        playing[guild.id]['nextTrackUser'] = None
 
-        url = JF_APICLIENT.getAudioHls(playing[guild.id]["Id"],br)
-        audio = discord.FFmpegOpusAudio(url, codec='copy')
-        audio.read()
+def runOnLoop(coro, loop):
+    # runs a coroutine on the bot event loop from a player thread and waits for its result
+    future = asyncio.run_coroutine_threadsafe(coro, loop)
+    try:
+        return future.result(RADIO_FETCH_TIMEOUT)
+    except BaseException:
+        future.cancel()
+        raise
+
+def fillRadioBuffer(state: dict, loop):
+    # picks the next random item(s) for radio mode
+    if state['mode'] == 'album':
+        albums = runOnLoop(JF_APICLIENT.getRandomItems('MusicAlbum', state['libraryId']), loop)
+        if not albums:
+            raise RuntimeError('No albums found for radio')
+        tracks = runOnLoop(JF_APICLIENT.getAlbumTracks(albums[0]['Id']), loop)
+        if not tracks:
+            raise RuntimeError(f'Radio album has no tracks: {albums[0]["Name"]}')
+        album = albums[0]['Name']
+    else:
+        tracks = runOnLoop(JF_APICLIENT.getRandomItems('Audio', state['libraryId']), loop)
+        if not tracks:
+            raise RuntimeError('No songs found for radio')
+        album = None
+
+    entries = []
+    for track in tracks:
+        entry = getItemEntry(track)
+        entry['Radio'] = True
+        entry['Album'] = album
+        entries.append(entry)
+    state['album'] = album
+    state['buffer'] = entries
+
+def takeRadioTrack(guild, vc, state: dict) -> bool:
+    # moves the next radio track into playing
+    # returns False if radio changed or something got queued while picking
+    global playing
+    if not state['buffer']:
+        fillRadioBuffer(state, vc.loop)
+    if radioStates.get(guild.id) is not state or guild.id in queues:
+        return False
+    entry = state['buffer'].pop(0)
+    entry['playtime-offset'] = datetime.timedelta()
+    # radio tracks belong to no user, fairplay rotation starts over after them
+    entry['nextTrackUserIdx'] = 0
+    playing[guild.id] = entry
+    return True
+
+def startPlayback(guild, vc, state: dict = None) -> bool:
+    # starts playing the track in playing
+    # returns False if the track was dropped because radio changed while it was loading
+    br = vc.channel.bitrate
+    url = JF_APICLIENT.getAudioHls(playing[guild.id]["Id"],br)
+    audio = discord.FFmpegOpusAudio(url, codec='copy')
+    try:
+        if not audio.read() and state is not None:
+            # nothing came out of the stream, without this check
+            # radio would spin through tracks while the server is failing
+            raise RuntimeError(f'No audio received for track {playing[guild.id]["Id"]}')
+        if playing[guild.id].get('Radio') and radioStates.get(guild.id) is not state:
+            audio.cleanup()
+            return False
         playing[guild.id]['starttime'] = datetime.datetime.now()
         playing[guild.id]['paused'] = False
         vc.play(audio, after=lambda e: playNextTrack(guild, e))
-    else:
-        playing.pop(guild.id, None)
-        asyncio.run_coroutine_threadsafe(vc.disconnect(), vc.loop)
+    except Exception:
+        audio.cleanup()
+        raise
+    return True
+
+def handleRadioFailure(guild, vc, state: dict, error: Exception):
+    # called when picking or starting a track failed while radio is on
+    # waits before the next attempt, turns radio off after too many failures in a row
+    state['failures'] += 1
+    log.warning('Radio failure %s/%s in guild %s: %r', state['failures'], RADIO_MAX_FAILURES, guild.id, error)
+    if state['failures'] >= RADIO_MAX_FAILURES:
+        if radioStates.get(guild.id) is state:
+            radioStates.pop(guild.id)
+            channel = state.get('channel')
+            if channel:
+                try:
+                    asyncio.run_coroutine_threadsafe(channel.send('Radio turned off: too many tracks failed to play in a row'), vc.loop)
+                except Exception as e:
+                    log.warning('Could not send radio notice: %r', e)
+        return
+
+    delay = min(RADIO_BACKOFF_BASE * 2 ** (state['failures'] - 1), RADIO_BACKOFF_MAX)
+    hadQueue = guild.id in queues
+    deadline = time.monotonic() + delay
+    # stop waiting early if radio gets turned off or changed, or if something gets queued
+    while time.monotonic() < deadline:
+        if radioStates.get(guild.id) is not state or (not hadQueue and guild.id in queues):
+            break
+        time.sleep(min(0.25, max(0, deadline - time.monotonic())))
+
+def playNextTrack(guild, error=None):
+    global playing
+    global queues
+    while True:
+        vc = guild.voice_client
+        if not vc:
+            # voice connection is gone, nothing left to play to
+            playing.pop(guild.id, None)
+            radioStates.pop(guild.id, None)
+            return
+
+        state = radioStates.get(guild.id)
+        try:
+            if guild.id in queues:
+                # queued tracks always go before radio
+                takeQueueTrack(guild)
+            elif state is not None:
+                if not takeRadioTrack(guild, vc, state):
+                    continue
+            else:
+                playing.pop(guild.id, None)
+                asyncio.run_coroutine_threadsafe(vc.disconnect(), vc.loop)
+                return
+
+            if not startPlayback(guild, vc, state):
+                continue
+        except Exception as e:
+            if state is None:
+                raise
+            # nothing is playing while radio waits to try again
+            playing.pop(guild.id, None)
+            handleRadioFailure(guild, vc, state, e)
+            continue
+
+        if state is not None:
+            state['failures'] = 0
+        return
 
 def getTrackString(item: dict, artistLimit: int = 1, showType: bool = False, showSize: bool = False):
 
@@ -215,7 +355,7 @@ def getFlattenedPlayQueue(guildId: int) -> list[dict]:
     if not config.get('fairplay'):
         return queues[guildId]
     else:
-        nextTrackUserIdx = playing[guildId].get('nextTrackUserIdx') % len(queues[guildId])
+        nextTrackUserIdx = playing.get(guildId, {}).get('nextTrackUserIdx', 0) % len(queues[guildId])
         userIds = list(queues[guildId].keys())
         orderedUserIds = userIds[nextTrackUserIdx:]+userIds[:nextTrackUserIdx]
         orderedTrackLists = [queues[guildId][uid] for uid in orderedUserIds]
@@ -225,6 +365,46 @@ def getFlattenedPlayQueue(guildId: int) -> list[dict]:
             tracks.extend([j for j in i if j is not None])
 
         return tracks
+
+def getRadioStatusLine(guildId: int) -> str:
+    state = radioStates.get(guildId)
+    if not state:
+        return ''
+    if state['mode'] == 'album':
+        if state['buffer']:
+            album = state['album'] if len(state['album']) <= 100 else state['album'][:97]+'...'
+            return f'Radio is on: continuing album {album} when the queue is empty'
+        return 'Radio is on: random albums play when the queue is empty'
+    return 'Radio is on: random songs play when the queue is empty'
+
+def getQueueMessage(guildId: int, page: int = 0) -> tuple[str, int]:
+    # returns the text for one page of the queue and the total number of pages
+    tracks = getFlattenedPlayQueue(guildId)
+    pages = len(tracks)//PLAYLIST_PAGESIZE+1
+    shown = tracks[page*PLAYLIST_PAGESIZE:page*PLAYLIST_PAGESIZE+PLAYLIST_PAGESIZE]
+    strs = [f'{i+page*PLAYLIST_PAGESIZE+1}. {getTrackString(shown[i])}' for i in range(len(shown))]
+    content = f'Tracks in playlist:\n{"\n".join(strs)}\nPage: {page+1}/{pages}'
+    radioLine = getRadioStatusLine(guildId)
+    if radioLine:
+        content += '\n' + radioLine
+    return content, pages
+
+async def getMusicLibraries() -> list[dict]:
+    # list of music libraries on the server, cached for a short while since autocomplete asks often
+    now = time.monotonic()
+    if musicLibraryCache['time'] is None or now - musicLibraryCache['time'] > LIBRARY_CACHE_SECS:
+        musicLibraryCache['items'] = await JF_APICLIENT.getMusicLibraries()
+        musicLibraryCache['time'] = now
+    return musicLibraryCache['items']
+
+async def libraryAutocomplete(ctx: discord.AutocompleteContext):
+    try:
+        libraries = await getMusicLibraries()
+    except Exception as e:
+        log.warning('Could not list music libraries: %r', e)
+        return []
+    typed = (ctx.value or '').lower()
+    return [discord.OptionChoice(name=lib['Name'][:100], value=lib['Id']) for lib in libraries if typed in lib['Name'].lower()][:25]
 
 '''
 Discord View Related
@@ -258,13 +438,11 @@ class listDropdown(discord.ui.Select):
         self.update_options(pages)
     
     async def callback(self, interaction: discord.Interaction):
-        pages = len(getFlattenedPlayQueue(interaction.guild_id))//PLAYLIST_PAGESIZE+1
         page = int(self._selected_values[0])-1
-        tracks = getFlattenedPlayQueue(interaction.guild_id)[page*PLAYLIST_PAGESIZE:page*PLAYLIST_PAGESIZE+PLAYLIST_PAGESIZE]
-        strs = [f'{i+page*PLAYLIST_PAGESIZE+1}. {getTrackString(tracks[i])}' for i in range(len(tracks))]
+        content, pages = getQueueMessage(interaction.guild_id, page)
         self.view.page = page
         self.view.updateItems(pages)
-        await interaction.response.edit_message(content=f'Tracks in playlist:\n{"\n".join(strs)}\nPage: {page+1}/{pages}', view=self.view)
+        await interaction.response.edit_message(content=content, view=self.view)
     
     def update_options(self, pages):
         self.options = [discord.SelectOption(label=str(i+1)) for i in range(min(pages, 25))]
@@ -275,13 +453,10 @@ class listPrevButton(discord.ui.Button):
         self.label = '◁'
 
     async def callback(self, interaction: discord.Interaction):
-        pages = len(getFlattenedPlayQueue(interaction.guild_id))//PLAYLIST_PAGESIZE+1
         self.view.page -= 1
-        page = self.view.page
-        tracks = getFlattenedPlayQueue(interaction.guild_id)[page*PLAYLIST_PAGESIZE:page*PLAYLIST_PAGESIZE+PLAYLIST_PAGESIZE]
-        strs = [f'{i+page*PLAYLIST_PAGESIZE+1}. {getTrackString(tracks[i])}' for i in range(len(tracks))]
+        content, pages = getQueueMessage(interaction.guild_id, self.view.page)
         self.view.updateItems(pages)
-        await interaction.response.edit_message(content=f'Tracks in playlist:\n{"\n".join(strs)}\nPage: {page+1}/{pages}', view=self.view)
+        await interaction.response.edit_message(content=content, view=self.view)
 
 class listNextButton(discord.ui.Button):
     def __init__(self):
@@ -289,13 +464,10 @@ class listNextButton(discord.ui.Button):
         self.label = '▷'
 
     async def callback(self, interaction: discord.Interaction):
-        pages = len(getFlattenedPlayQueue(interaction.guild_id))//PLAYLIST_PAGESIZE+1
         self.view.page += 1
-        page = self.view.page
-        tracks = getFlattenedPlayQueue(interaction.guild_id)[page*PLAYLIST_PAGESIZE:page*PLAYLIST_PAGESIZE+PLAYLIST_PAGESIZE]
-        strs = [f'{i+page*PLAYLIST_PAGESIZE+1}. {getTrackString(tracks[i])}' for i in range(len(tracks))]
+        content, pages = getQueueMessage(interaction.guild_id, self.view.page)
         self.view.updateItems(pages)
-        await interaction.response.edit_message(content=f'Tracks in playlist:\n{"\n".join(strs)}\nPage: {page+1}/{pages}', view=self.view)
+        await interaction.response.edit_message(content=content, view=self.view)
 
 
 class listRefreshButton(discord.ui.Button):
@@ -304,12 +476,9 @@ class listRefreshButton(discord.ui.Button):
         self.label = '⟳'
     
     async def callback(self, interaction: discord.Interaction):
-        pages = len(getFlattenedPlayQueue(interaction.guild_id))//PLAYLIST_PAGESIZE+1
-        page = self.view.page
-        tracks = getFlattenedPlayQueue(interaction.guild_id)[page*PLAYLIST_PAGESIZE:page*PLAYLIST_PAGESIZE+PLAYLIST_PAGESIZE]
-        strs = [f'{i+page*PLAYLIST_PAGESIZE+1}. {getTrackString(tracks[i])}' for i in range(len(tracks))]
+        content, pages = getQueueMessage(interaction.guild_id, self.view.page)
         self.view.updateItems(pages)
-        await interaction.response.edit_message(content=f'Tracks in playlist:\n{"\n".join(strs)}\nPage: {page+1}/{pages}', view=self.view)
+        await interaction.response.edit_message(content=content, view=self.view)
 
 
 class listView(discord.ui.View):
@@ -394,16 +563,20 @@ async def nowplaying(ctx: discord.ApplicationContext):
         if not playing[ctx.guild_id]['paused']:
             td += datetime.datetime.now() - track['starttime']
         length = track["Length"]
-        await ctx.respond(f'Currently Playing: {getTrackString(track)} {formatTimeSecs(td.seconds, length >= 3600)}/{formatTimeSecs(length)}')
+        radioTag = ''
+        if track.get('Radio'):
+            radioTag = f' [Radio: {track["Album"]}]' if track.get('Album') else ' [Radio]'
+        await ctx.respond(f'Currently Playing: {getTrackString(track)} {formatTimeSecs(td.seconds, length >= 3600)}/{formatTimeSecs(length)}{radioTag}')
     else:
         await ctx.respond('Not Currently Playing')
 
 @cmdgrp.command()
 async def queue(ctx: discord.ApplicationContext):
     if ctx.guild_id in queues:
-        tracks = getFlattenedPlayQueue(ctx.guild_id)
-        strs = [f'{i}. {getTrackString(tracks[i])}' for i in range(min(len(tracks), PLAYLIST_PAGESIZE))]
-        await ctx.respond(f'Tracks in playlist:\n{"\n".join(strs)}\nPage: 1/{len(tracks)//PLAYLIST_PAGESIZE+1}', view=listView(len(tracks)//PLAYLIST_PAGESIZE+1))
+        content, pages = getQueueMessage(ctx.guild_id)
+        await ctx.respond(content, view=listView(pages))
+    elif ctx.guild_id in radioStates:
+        await ctx.respond(f'Empty Queue\n{getRadioStatusLine(ctx.guild_id)}')
     else:
         await ctx.respond('Empty Queue')
 
@@ -422,7 +595,10 @@ async def start(ctx: discord.ApplicationContext):
 @cmdgrp.command()
 async def pause(ctx: discord.ApplicationContext):
     global playing
-    if ctx.voice_client:
+    if ctx.voice_client and ctx.guild_id not in playing:
+        # radio is between tracks, waiting to retry after a failure
+        await ctx.respond('Not currently playing')
+    elif ctx.voice_client:
         if playing[ctx.guild_id]['paused']:
             await ctx.respond('Already paused')
         else:
@@ -437,7 +613,10 @@ async def pause(ctx: discord.ApplicationContext):
 @cmdgrp.command()
 async def resume(ctx: discord.ApplicationContext):
     global playing
-    if ctx.voice_client:
+    if ctx.voice_client and ctx.guild_id not in playing:
+        # radio is between tracks, waiting to retry after a failure
+        await ctx.respond('Not currently playing')
+    elif ctx.voice_client:
         if playing[ctx.guild_id]['paused']:
             await ctx.respond('Resuming playback')
             playing[ctx.guild_id]['starttime'] = datetime.datetime.now()
@@ -455,6 +634,8 @@ async def stop(ctx: discord.ApplicationContext):
         global queues
         if ctx.guild_id in queues:
             queues.pop(ctx.guild_id)
+        # radio has to go too, otherwise it would just pick another track
+        radioStates.pop(ctx.guild_id, None)
         ctx.voice_client.stop()
     else:
         await ctx.respond('Not connected to any voice channel')
@@ -579,6 +760,73 @@ async def clear(ctx: discord.ApplicationContext):
     else:
         await ctx.respond('Playlist cleared')
         queues.pop(ctx.guild_id)
+
+@cmdgrp.command()
+async def radio(ctx: discord.ApplicationContext,
+                mode: discord.Option(str, choices=['song', 'album', 'off']),
+                library: discord.Option(str, autocomplete=libraryAutocomplete, required=False) = None):
+    if mode == 'off':
+        if radioStates.pop(ctx.guild_id, None) is None:
+            await ctx.respond('Radio is not on')
+        else:
+            await ctx.respond('Radio turned off, playback ends after the current track and the queue')
+        return
+
+    if not ctx.author.voice and not ctx.voice_client:
+        await ctx.respond('You are not in any voice channel')
+        return
+
+    await ctx.defer()
+    itemType = 'Audio' if mode == 'song' else 'MusicAlbum'
+    libraryId = None
+    libraryName = None
+    try:
+        if library:
+            libraries = await getMusicLibraries()
+            for lib in libraries:
+                if lib['Id'] == library or lib['Name'].lower() == library.lower():
+                    libraryId = lib['Id']
+                    libraryName = lib['Name']
+                    break
+            else:
+                await ctx.respond('Music library not found, pick one from the suggestions')
+                return
+        # make sure there is something to play before turning radio on
+        sample = await JF_APICLIENT.getRandomItems(itemType, libraryId)
+    except Exception as e:
+        log.warning('Could not start radio: %r', e)
+        await ctx.respond('Could not get items from the Jellyfin server')
+        return
+
+    source = f'the {libraryName} library' if libraryName else 'all libraries'
+    if not sample:
+        await ctx.respond(f'No {mode}s found in {source}')
+        return
+
+    current = radioStates.get(ctx.guild_id)
+    if current and current['mode'] == mode and current['libraryId'] == libraryId:
+        await ctx.respond(f'Radio is already playing random {mode}s from {source}')
+        return
+
+    # replacing the state drops what is left of the current radio album
+    # the track that is playing right now is left alone
+    radioStates[ctx.guild_id] = {
+        'mode': mode,
+        'libraryId': libraryId,
+        'libraryName': libraryName,
+        'buffer': [],
+        'album': None,
+        'failures': 0,
+        'channel': ctx.channel
+    }
+    await ctx.respond(f'Radio on: playing random {mode}s from {source} whenever the queue is empty')
+
+    if not ctx.voice_client:
+        try:
+            await startPlayer(ctx)
+        except Exception:
+            radioStates.pop(ctx.guild_id, None)
+            raise
 
 '''
 Debug Commands

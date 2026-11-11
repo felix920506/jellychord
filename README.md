@@ -8,6 +8,7 @@ Jellyfin music bot for Discord. Name courtesy of [@thornbill](https://github.com
 - Supports multiple channels / servers playing at the same time
 - Transcoding on the Jellyfin server reduces network traffic
 - Fairplay mode: Users take turns listening to tracks they choose
+- Radio mode: Nonstop random songs or albums from your library until you tell it to stop
 - Support for Discord DAVE E2EE Voice protocol
 
 ## Requirements
@@ -97,6 +98,8 @@ This list will assume the default prefix of `jellychord`. This can be changed in
   Removes the item at the specified index from the playlist. Index starts with 1.
 - `/jellychord clear`
   Clears the queue for the current Discord server.
+- `/jellychord radio <mode> <library>`
+  Turns radio mode on or off. Options for `<mode>`: `song` plays a random song whenever the queue is empty. `album` picks a random album and plays its tracks in album order, then picks another. `off` turns radio off, playback ends after the current track and the queue. `<library>` is optional and limits radio to one music library, all libraries are used when omitted. Radio plays nonstop until it is turned off or `/jellychord stop` is used. Tracks queued while radio is on play after the current track, then radio continues once the queue is empty. All other commands work the same as without radio.
 - `/jellychord promote <index>`
   Promotes the item at the specified index from the playlist to the front. Index starts with 1.
 - `/jellychord demote <index>`

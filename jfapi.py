@@ -90,3 +90,31 @@ class JFAPI():
         async with self._session.get(endpoint, params=params) as res:
             return (await res.json())['Items']
 
+    # Gets random items of one type, optionally limited to one library
+    # GET /Items
+    async def getRandomItems(self, itemType: str, libraryId: str = None, limit: int = 1):
+        await self.checkSession()
+        endpoint = self.__getEndpointUrl('/Items')
+        params = {
+            'ApiKey': self.__apikey,
+            'includeItemTypes': itemType,
+            'recursive': 'true',
+            'sortBy': 'Random',
+            'limit': limit
+        }
+        if libraryId:
+            params['parentId'] = libraryId
+        async with self._session.get(endpoint, params=params) as res:
+            return (await res.json())['Items']
+
+    # Gets the music libraries on the server
+    # GET /Library/MediaFolders
+    async def getMusicLibraries(self):
+        await self.checkSession()
+        endpoint = self.__getEndpointUrl('/Library/MediaFolders')
+        params = {
+            'ApiKey': self.__apikey
+        }
+        async with self._session.get(endpoint, params=params) as res:
+            items = (await res.json())['Items']
+            return [i for i in items if i.get('CollectionType') == 'music']
